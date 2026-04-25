@@ -13,34 +13,52 @@ const PALETTE = [
 function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 
 // ─── localStorage / sessionStorage helpers ────────────────────────────────────
-const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder' };
+const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', proxy: 'usp_proxy' };
 const SS_KEY  = 'usp_token';
+
+// Built-in CORS proxy presets
+const PROXY_PRESETS = [
+  { label: 'None (direct)',              value: '' },
+  { label: 'corsproxy.io',               value: 'https://corsproxy.io/?url=' },
+  { label: 'cors-anywhere (Heroku)',     value: 'https://cors-anywhere.herokuapp.com/' },
+  { label: 'Custom…',                    value: '__custom__' },
+];
 
 function loadConfig() {
   return {
     url:    localStorage.getItem(LS_KEYS.url)    || '',
     tenant: localStorage.getItem(LS_KEYS.tenant) || 'Default',
     folder: localStorage.getItem(LS_KEYS.folder) || '',
+    proxy:  localStorage.getItem(LS_KEYS.proxy)  || '',
     token:  sessionStorage.getItem(SS_KEY)        || '',
   };
 }
-function saveConfig({ url, tenant, folder, token }) {
+function saveConfig({ url, tenant, folder, proxy, token }) {
   localStorage.setItem(LS_KEYS.url,    url);
   localStorage.setItem(LS_KEYS.tenant, tenant);
   localStorage.setItem(LS_KEYS.folder, folder);
+  localStorage.setItem(LS_KEYS.proxy,  proxy);
   sessionStorage.setItem(SS_KEY, token);
 }
 
 // ─── UiPath API helpers ────────────────────────────────────────────────────────
 async function apiFetch(cfg, path, params = {}) {
-  const base   = cfg.url.replace(/\/$/, '');
-  const qs     = new URLSearchParams(params).toString();
-  const fullUrl = `${base}/${cfg.tenant}${path}${qs ? '?' + qs : ''}`;
+  const base    = cfg.url.replace(/\/$/, '');
+  const qs      = new URLSearchParams(params).toString();
+  const apiUrl = `${base}/${cfg.tenant}${path}${qs ? '?' + qs : ''}`;
+  const proxy  = (cfg.proxy || '').trim();
+  // Query-param proxies (end with `=`) need the target URL encoded;
+  // path proxies (end with `/`) accept it raw.
+  const fullUrl = proxy
+    ? (proxy.endsWith('=') ? `${proxy}${encodeURIComponent(apiUrl)}` : `${proxy}${apiUrl}`)
+    : apiUrl;
+
   const headers = {
     'Authorization': `Bearer ${cfg.token}`,
     'Content-Type':  'application/json',
     'X-UIPATH-OrganizationUnitId': cfg.folder,
   };
+
   const res = await fetch(fullUrl, { headers });
   if (res.status === 401) throw new Error('401: Token expired or invalid. Please re-enter your Bearer Token.');
   if (!res.ok) throw new Error(`HTTP ${res.status} – ${res.statusText}`);
@@ -340,6 +358,19 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
   const [local, setLocal] = useState(cfg);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
 
+  // Determine which preset is active (or custom)
+  const presetMatch = PROXY_PRESETS.find(
+    p => p.value !== '__custom__' && p.value === local.proxy
+  );
+  const [proxyMode, setProxyMode] = useState(
+    presetMatch ? presetMatch.value : (local.proxy ? '__custom__' : '')
+  );
+
+  function handleProxySelect(val) {
+    setProxyMode(val);
+    if (val !== '__custom__') set('proxy', val);
+  }
+
   function handleFetch() {
     saveConfig(local);
     onChange(local);
@@ -368,12 +399,50 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
           placeholder="1234" />
       </div>
 
-      <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 8 }}>
         <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>
           Bearer Token <span style={{ color: '#FA4616', fontSize: 10 }}>(session only)</span>
         </div>
         <input type="password" value={local.token} onChange={e => set('token', e.target.value)}
           placeholder="eyJ…" />
+      </div>
+
+      {/* CORS Proxy */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>
+          CORS Proxy
+          <span style={{ marginLeft: 6, fontSize: 10, color: '#1A3050',
+            background: '#0B1929', border: '1px solid #1A3050',
+            borderRadius: 3, padding: '1px 5px' }}>
+            fixes network errors
+          </span>
+        </div>
+        <select value={proxyMode} onChange={e => handleProxySelect(e.target.value)}>
+          {PROXY_PRESETS.map(p => (
+            <option key={p.value} value={p.value}>{p.label}</option>
+          ))}
+        </select>
+        {proxyMode === '__custom__' && (
+          <input
+            type="text"
+            value={local.proxy}
+            onChange={e => set('proxy', e.target.value)}
+            placeholder="https://my-proxy.example.com/?url="
+            style={{ marginTop: 5 }}
+          />
+        )}
+        {proxyMode !== '' && proxyMode !== '__custom__' && (
+          <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 4, lineHeight: 1.5 }}>
+            Requests will be routed through <strong style={{ color: '#00AEEF' }}>{proxyMode.replace('https://','').split('/')[0]}</strong>.
+            Your token is only sent to the proxy over HTTPS.
+          </div>
+        )}
+        {proxyMode === '' && (
+          <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 4, lineHeight: 1.5 }}>
+            If you see a CORS error, select a proxy above or install the
+            {' '}<strong>Allow CORS</strong> browser extension.
+          </div>
+        )}
       </div>
 
       <button className="btn-primary" onClick={handleFetch} disabled={loading || !local.url || !local.token}
@@ -382,7 +451,7 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
       </button>
 
       <div style={{ marginTop: 10, fontSize: 11, color: '#5A7A9A', lineHeight: 1.5 }}>
-        URL, Tenant &amp; Folder saved to localStorage.
+        URL, Tenant, Folder &amp; Proxy saved to localStorage.<br/>
         Token stored in sessionStorage (clears on tab close).
       </div>
     </div>
@@ -479,8 +548,8 @@ function App() {
       setSchedules(enriched);
     } catch (err) {
       const msg = err.message || String(err);
-      if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS')) {
-        setError('CORS / Network error: The Orchestrator URL may not allow requests from this origin. Consider using a CORS proxy or the UiPath API Gateway.');
+      if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS') || msg.includes('net::ERR')) {
+        setError('__cors__');
       } else {
         setError(msg);
       }
@@ -668,13 +737,49 @@ function App() {
 
           {/* Error banner */}
           {error && (
-            <div className="error-banner" style={{ marginBottom: 16 }}>
-              <strong>Error:</strong> {error}
+            <div className="error-banner" style={{ marginBottom: 16, position: 'relative' }}>
               <button
                 onClick={() => setError(null)}
-                style={{ float: 'right', background: 'none', border: 'none', color: '#FA4616', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>
+                style={{ position: 'absolute', top: 8, right: 10, background: 'none', border: 'none', color: '#FA4616', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>
                 ×
               </button>
+
+              {error === '__cors__' ? (
+                <>
+                  <div style={{ fontWeight: 700, marginBottom: 8 }}>
+                    CORS / Network Error — browser blocked the request
+                  </div>
+                  <div style={{ fontSize: 12, lineHeight: 1.7, color: '#C8D8E8' }}>
+                    Orchestrator's API doesn't send cross-origin headers to browser clients.<br/>
+                    Pick one of these fixes:
+                  </div>
+                  <ol style={{ fontSize: 12, lineHeight: 1.9, margin: '8px 0 4px 18px', color: '#C8D8E8' }}>
+                    <li>
+                      <strong style={{ color: '#00AEEF' }}>CORS Proxy (easiest)</strong> — select
+                      {' '}<em>corsproxy.io</em> in the <strong>CORS Proxy</strong> dropdown in the sidebar,
+                      then click Fetch Schedules again.
+                    </li>
+                    <li>
+                      <strong style={{ color: '#00AEEF' }}>Browser extension</strong> — install
+                      {' '}<em>Allow CORS: Access-Control-Allow-Origin</em> for Chrome/Firefox
+                      and enable it for your Orchestrator hostname.
+                    </li>
+                    <li>
+                      <strong style={{ color: '#00AEEF' }}>Server-side proxy</strong> — host a small
+                      reverse-proxy (nginx / Cloudflare Worker) that adds CORS headers to Orchestrator responses.
+                    </li>
+                    <li>
+                      <strong style={{ color: '#00AEEF' }}>On-prem config</strong> — add your GitHub Pages
+                      origin to the Orchestrator <em>web.config</em> CORS allowed origins.
+                    </li>
+                  </ol>
+                  <div style={{ fontSize: 11, color: '#5A7A9A' }}>
+                    Note: all proxy options transmit your Bearer Token over HTTPS — use HTTPS-only proxies.
+                  </div>
+                </>
+              ) : (
+                <><strong>Error:</strong> {error}</>
+              )}
             </div>
           )}
 

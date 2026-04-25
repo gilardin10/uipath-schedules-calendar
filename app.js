@@ -25,7 +25,7 @@ function loadConfig() {
     url:       localStorage.getItem(LS_KEYS.url)    || '',
     tenant:    localStorage.getItem(LS_KEYS.tenant) || 'Default',
     folder:    localStorage.getItem(LS_KEYS.folder) || '',
-    proxy:     localStorage.getItem(LS_KEYS.proxy)  || '',
+    proxy:     localStorage.getItem(LS_KEYS.proxy)  || 'https://corsproxy.io/?url=',
     apiPrefix: storedPrefix !== null ? storedPrefix : '/orchestrator_',
     token:     sessionStorage.getItem(SS_KEY)        || '',
   };
@@ -273,7 +273,7 @@ function Toast({ error, onClose }) {
   const isCors = error === '__cors__';
   const title   = isCors ? 'CORS / Network Error' : 'Request Failed';
   const message = isCors
-    ? 'The browser blocked the request. Enable the proxy toggle in the sidebar.'
+    ? 'The browser blocked the request. Requests are routed via corsproxy.io by default — check your Orchestrator URL and token.'
     : error;
 
   // Warning icon SVG
@@ -303,8 +303,8 @@ function Toast({ error, onClose }) {
               {expanded && (
                 <div className="toast-detail">
                   <ol>
-                    <li><strong>Proxy toggle</strong> — enable "CORS Proxy" in the sidebar and click Fetch again.</li>
-                    <li><strong>cors-anywhere demo</strong> — visit <em>cors-anywhere.herokuapp.com/corsdemo</em> to unlock temporary access.</li>
+                    <li><strong>corsproxy.io</strong> is active by default. If it's down, try again in a moment.</li>
+                    <li><strong>Browser extension</strong> — install <em>Allow CORS</em> and disable the proxy (clear usp_proxy in localStorage).</li>
                     <li><strong>Browser extension</strong> — install <em>Allow CORS</em> for Chrome/Firefox.</li>
                     <li><strong>On-prem</strong> — add your origin to Orchestrator's web.config CORS list.</li>
                   </ol>
@@ -672,18 +672,10 @@ function TokenField({ value, onChange }) {
   );
 }
 
-const CORS_ANYWHERE = 'https://cors-anywhere.herokuapp.com/';
-
 // ─── Config panel ─────────────────────────────────────────────────────────────
 function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
   const [local, setLocal] = useState(cfg);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
-
-  // Proxy toggle: true = use cors-anywhere, false = direct
-  const proxyOn = local.proxy === CORS_ANYWHERE;
-  function toggleProxy(enabled) {
-    set('proxy', enabled ? CORS_ANYWHERE : '');
-  }
 
   function handleFetch() {
     saveConfig(local);
@@ -745,35 +737,6 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
 
       <div style={{ marginBottom: 10 }}>
         <TokenField value={local.token} onChange={v => set('token', v)} />
-      </div>
-
-      <hr className="divider" />
-
-      {/* ── CORS Proxy toggle ── */}
-      <div style={{ marginBottom: 14 }}>
-        <div className="toggle-row" style={{ marginBottom: 5 }}>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: '#C8D8E8' }}>CORS Proxy</div>
-            <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 1 }}>
-              Route via cors-anywhere.herokuapp.com
-            </div>
-          </div>
-          <label className="toggle-switch">
-            <input type="checkbox" checked={proxyOn} onChange={e => toggleProxy(e.target.checked)} />
-            <div className="toggle-track">
-              <div className="toggle-thumb" />
-            </div>
-          </label>
-        </div>
-        {proxyOn && (
-          <div style={{ fontSize: 10, color: '#FFB800', lineHeight: 1.5,
-            background: 'rgba(255,184,0,.07)', border: '1px solid rgba(255,184,0,.2)',
-            borderRadius: 4, padding: '5px 8px' }}>
-            <strong>Note:</strong> You may need to visit{' '}
-            <strong>cors-anywhere.herokuapp.com/corsdemo</strong> once to enable
-            temporary access. Your Bearer Token travels over HTTPS.
-          </div>
-        )}
       </div>
 
       <button className="btn-primary" onClick={handleFetch}

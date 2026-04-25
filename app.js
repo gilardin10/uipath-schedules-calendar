@@ -13,7 +13,7 @@ const PALETTE = [
 function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 
 // ─── localStorage / sessionStorage helpers ────────────────────────────────────
-const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', proxy: 'usp_proxy' };
+const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', proxy: 'usp_proxy', prefix: 'usp_prefix' };
 const SS_KEY  = 'usp_token';
 
 // Built-in CORS proxy presets
@@ -25,31 +25,43 @@ const PROXY_PRESETS = [
 ];
 
 function loadConfig() {
+  // apiPrefix: '/orchestrator_' for UiPath Cloud; '' for on-prem.
+  // Default to '/orchestrator_' — the most common case.
+  const storedPrefix = localStorage.getItem(LS_KEYS.prefix);
   return {
-    url:    localStorage.getItem(LS_KEYS.url)    || '',
-    tenant: localStorage.getItem(LS_KEYS.tenant) || 'Default',
-    folder: localStorage.getItem(LS_KEYS.folder) || '',
-    proxy:  localStorage.getItem(LS_KEYS.proxy)  || '',
-    token:  sessionStorage.getItem(SS_KEY)        || '',
+    url:       localStorage.getItem(LS_KEYS.url)    || '',
+    tenant:    localStorage.getItem(LS_KEYS.tenant) || 'Default',
+    folder:    localStorage.getItem(LS_KEYS.folder) || '',
+    proxy:     localStorage.getItem(LS_KEYS.proxy)  || '',
+    apiPrefix: storedPrefix !== null ? storedPrefix : '/orchestrator_',
+    token:     sessionStorage.getItem(SS_KEY)        || '',
   };
 }
-function saveConfig({ url, tenant, folder, proxy, token }) {
+function saveConfig({ url, tenant, folder, proxy, apiPrefix, token }) {
   localStorage.setItem(LS_KEYS.url,    url);
   localStorage.setItem(LS_KEYS.tenant, tenant);
   localStorage.setItem(LS_KEYS.folder, folder);
   localStorage.setItem(LS_KEYS.proxy,  proxy);
+  localStorage.setItem(LS_KEYS.prefix, apiPrefix);
   sessionStorage.setItem(SS_KEY, token);
 }
 
 // ─── UiPath API helpers ────────────────────────────────────────────────────────
+// Build OData query strings manually: URLSearchParams percent-encodes '$' to
+// '%24', which causes Orchestrator to return 400 Bad Request.
+function buildODataQS(params) {
+  return Object.entries(params)
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join('&');
+}
+
 async function apiFetch(cfg, path, params = {}) {
-  const base    = cfg.url.replace(/\/$/, '');
-  const qs      = new URLSearchParams(params).toString();
-  const apiUrl = `${base}/${cfg.tenant}${path}${qs ? '?' + qs : ''}`;
-  const proxy  = (cfg.proxy || '').trim();
-  // Query-param proxies (end with `=`) need the target URL encoded;
-  // path proxies (end with `/`) accept it raw.
-  const fullUrl = proxy
+  const base      = cfg.url.replace(/\/$/, '');
+  const prefix    = (cfg.apiPrefix || '').replace(/\/$/, '');
+  const qs        = Object.keys(params).length ? buildODataQS(params) : '';
+  const apiUrl    = `${base}/${cfg.tenant}${prefix}${path}${qs ? '?' + qs : ''}`;
+  const proxy     = (cfg.proxy || '').trim();
+  const fullUrl   = proxy
     ? (proxy.endsWith('=') ? `${proxy}${encodeURIComponent(apiUrl)}` : `${proxy}${apiUrl}`)
     : apiUrl;
 
@@ -61,13 +73,18 @@ async function apiFetch(cfg, path, params = {}) {
 
   const res = await fetch(fullUrl, { headers });
   if (res.status === 401) throw new Error('401: Token expired or invalid. Please re-enter your Bearer Token.');
-  if (!res.ok) throw new Error(`HTTP ${res.status} – ${res.statusText}`);
+  if (res.status === 400) throw new Error(
+    `400: Bad Request.\nAttempted URL: ${apiUrl}\n\nCommon causes:\n` +
+    `• Orchestrator Path is wrong — Cloud uses /orchestrator_, on-prem is usually empty\n` +
+    `• Tenant name is incorrect\n• Folder ID does not exist in this tenant`
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status} – ${res.statusText}\nURL: ${apiUrl}`);
   return res.json();
 }
 
 async function fetchSchedules(cfg) {
   const data = await apiFetch(cfg, '/odata/ProcessSchedules', {
-    '$select': 'Id,Name,StartProcessCron,TimeZoneId,Enabled,ReleaseId,ReleaseName,StartStrategy',
+    '$select': 'Id,Name,StartProcessCron,TimeZoneId,Enabled,ReleaseId,ReleaseName',
     '$filter': 'Enabled eq true',
     '$top': 500,
   });
@@ -75,11 +92,14 @@ async function fetchSchedules(cfg) {
 }
 
 async function fetchJobsForSchedule(cfg, releaseName) {
+  // Escape single quotes for OData string literals; do NOT encodeURIComponent
+  // here — buildODataQS handles encoding of the entire value.
+  const safeRelease = releaseName.replace(/'/g, "''");
   const data = await apiFetch(cfg, '/odata/Jobs', {
-    '$filter': `ReleaseName eq '${encodeURIComponent(releaseName).replace(/%27/g,"''")}'`,
-    '$select': 'Id,StartTime,EndTime,State',
+    '$filter':  `ReleaseName eq '${safeRelease}'`,
+    '$select':  'Id,StartTime,EndTime,State',
     '$orderby': 'StartTime desc',
-    '$top': 10,
+    '$top':     10,
   });
   return (data.value || []);
 }
@@ -496,6 +516,35 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
         <input type="text" value={local.folder} onChange={e => set('folder', e.target.value)}
           placeholder="1234" />
       </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>
+          Orchestrator Path
+          <span style={{ marginLeft: 6, fontSize: 10, background: '#0B1929',
+            border: '1px solid #1A3050', borderRadius: 3, padding: '1px 5px', color: '#5A7A9A' }}>
+            Cloud vs on-prem
+          </span>
+        </div>
+        <input type="text" value={local.apiPrefix}
+          onChange={e => set('apiPrefix', e.target.value)}
+          placeholder="/orchestrator_" />
+        <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 3, lineHeight: 1.5 }}>
+          <strong style={{ color: '#00AEEF' }}>Cloud:</strong> /orchestrator_ &nbsp;|&nbsp;
+          <strong style={{ color: '#00AEEF' }}>On-prem:</strong> leave blank
+        </div>
+      </div>
+
+      {/* URL preview */}
+      {local.url && local.tenant && (
+        <div style={{ marginBottom: 10, padding: '6px 8px', background: '#040E19',
+          border: '1px solid #1A3050', borderRadius: 5 }}>
+          <div style={{ fontSize: 10, color: '#5A7A9A', marginBottom: 2 }}>URL preview</div>
+          <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#00AEEF',
+            wordBreak: 'break-all', lineHeight: 1.5 }}>
+            {local.url.replace(/\/$/, '')}/{local.tenant}{local.apiPrefix || ''}/odata/ProcessSchedules
+          </div>
+        </div>
+      )}
 
       <div style={{ marginBottom: 8 }}>
         <TokenField value={local.token} onChange={v => set('token', v)} />

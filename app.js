@@ -157,6 +157,47 @@ function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function endOfMonth(d)   { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
 function addDays(d, n)   { return new Date(d.getTime() + n * 86400000); }
 
+// ─── Collapsible sidebar section ─────────────────────────────────────────────
+function CollapsibleSection({ title, children, defaultOpen = true, badge }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom: 2 }}>
+      <button className="collapsible-btn" onClick={() => setOpen(o => !o)}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span className="section-label" style={{ margin: 0 }}>{title}</span>
+          {badge && (
+            <span style={{ fontSize: 10, background: '#00C48C', color: '#040E19',
+              borderRadius: 8, padding: '1px 6px', fontWeight: 700 }}>
+              {badge}
+            </span>
+          )}
+        </div>
+        <svg className={`collapsible-chevron${open ? ' open' : ''}`}
+          width="12" height="12" viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" strokeWidth="2.5">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+      {open && <div style={{ paddingTop: 6, paddingBottom: 4 }}>{children}</div>}
+    </div>
+  );
+}
+
+// ─── Event-column layout (greedy, avoids overlaps) ────────────────────────────
+function computeEventCols(events) {
+  if (!events.length) return [];
+  const sorted = [...events].sort((a, b) => a.occurrence.start - b.occurrence.start);
+  const colEnds = []; // track the end-time of the last event in each column
+  const assignments = sorted.map(ev => {
+    let col = colEnds.findIndex(end => ev.occurrence.start >= end);
+    if (col === -1) col = colEnds.length;
+    colEnds[col] = ev.occurrence.end;
+    return col;
+  });
+  const totalCols = colEnds.length || 1;
+  return sorted.map((ev, i) => ({ ev, col: assignments[i], totalCols }));
+}
+
 // ─── Skeleton components ──────────────────────────────────────────────────────
 function SkeletonLine({ w = '100%', h = 14 }) {
   return <div className="skeleton" style={{ width: w, height: h, marginBottom: 6 }} />;
@@ -379,6 +420,116 @@ function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave }) {
   );
 }
 
+// ─── Time-grid view (week / 3-day / day) ─────────────────────────────────────
+const HOUR_H = 52; // px per hour row
+
+function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
+  const scrollRef = useRef(null);
+  const today = new Date();
+
+  // Scroll to show 07:00 on first render
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 7 * HOUR_H;
+  }, []);
+
+  return (
+    <div className="tg-wrap">
+      {/* ── Day headers ── */}
+      <div className="tg-header">
+        <div className="tg-gutter" />
+        {days.map((date, i) => {
+          const isToday = sameDay(date, today);
+          return (
+            <div key={i} className="tg-day-hdr">
+              <div className="tg-day-weekday">
+                {date.toLocaleDateString('default', { weekday: 'short' })}
+              </div>
+              <div className={`tg-day-num${isToday ? ' today' : ''}`}>
+                {date.getDate()}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Scrollable body ── */}
+      <div className="tg-scroll" ref={scrollRef}>
+        <div className="tg-body" style={{ height: 24 * HOUR_H }}>
+
+          {/* Time gutter */}
+          <div className="tg-time-col" style={{ height: 24 * HOUR_H }}>
+            {Array.from({ length: 24 }, (_, h) => (
+              h === 0 ? null : (
+                <div key={h} className="tg-time-label" style={{ top: h * HOUR_H }}>
+                  {String(h).padStart(2, '0')}:00
+                </div>
+              )
+            ))}
+          </div>
+
+          {/* Day columns */}
+          {days.map((date, di) => {
+            const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+            const events = eventsByDay[key] || [];
+            const laid   = computeEventCols(events);
+            const isToday = sameDay(date, today);
+            const nowMin  = isToday ? today.getHours() * 60 + today.getMinutes() : null;
+
+            return (
+              <div key={di} className="tg-col"
+                style={{ background: isToday ? 'rgba(250,70,22,.018)' : 'transparent' }}>
+
+                {/* Hour lines */}
+                {Array.from({ length: 24 }, (_, h) => (
+                  <div key={h} className="tg-hour-line" style={{ top: h * HOUR_H }} />
+                ))}
+                {/* Half-hour lines */}
+                {Array.from({ length: 24 }, (_, h) => (
+                  <div key={`h${h}`} className="tg-half-line" style={{ top: h * HOUR_H + HOUR_H / 2 }} />
+                ))}
+
+                {/* Current-time indicator */}
+                {nowMin !== null && (
+                  <div className="tg-now-line" style={{ top: (nowMin / 60) * HOUR_H }}>
+                    <div className="tg-now-dot" />
+                  </div>
+                )}
+
+                {/* Events */}
+                {laid.map(({ ev, col, totalCols }, i) => {
+                  const startMin = ev.occurrence.start.getHours() * 60 + ev.occurrence.start.getMinutes();
+                  const durMin   = Math.max((ev.occurrence.end - ev.occurrence.start) / 60000, 15);
+                  const topPx    = (startMin / 60) * HOUR_H;
+                  const heightPx = Math.max((durMin / 60) * HOUR_H - 2, 18);
+                  const color    = colorMap[ev.schedule.id] || '#5A7A9A';
+                  const pct      = 100 / totalCols;
+                  return (
+                    <div key={i} className="tg-event"
+                      style={{
+                        top: topPx + 1, height: heightPx,
+                        left: `calc(${col * pct}% + 2px)`,
+                        width: `calc(${pct}% - 4px)`,
+                        background: color + '28',
+                        borderLeft: `3px solid ${color}`,
+                        color,
+                      }}
+                      onMouseEnter={e => onHover(ev, { x: e.clientX, y: e.clientY })}
+                      onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
+                      onMouseLeave={onLeave}>
+                      <div className="tg-event-time">{fmtTime(ev.occurrence.start)}</div>
+                      {heightPx > 28 && <div className="tg-event-name">{ev.schedule.name}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Sidebar multi-select filter ──────────────────────────────────────────────
 function FilterList({ label, items, selected, onToggle, colorMap }) {
   const [search, setSearch] = useState('');
@@ -388,8 +539,8 @@ function FilterList({ label, items, selected, onToggle, colorMap }) {
   const allSelected = items.every(it => selected.has(it.id));
 
   return (
-    <div style={{ marginBottom: 16 }}>
-      <div className="section-label">{label}</div>
+    <div style={{ marginBottom: 8 }}>
+      {label && <div className="section-label">{label}</div>}
       <input
         type="text"
         placeholder="Search…"
@@ -661,7 +812,7 @@ function Legend({ schedules, colorMap, selectedProcs, onToggle }) {
 // ─── Main App ─────────────────────────────────────────────────────────────────
 function App() {
   const [cfg,         setCfg]         = useState(loadConfig);
-  const [schedules,   setSchedules]   = useState([]);   // enriched schedule objects
+  const [schedules,   setSchedules]   = useState([]);
   const [colorMap,    setColorMap]    = useState({});
   const [selectedProcs, setSelectedProcs] = useState(new Set());
   const [projDays,    setProjDays]    = useState(30);
@@ -669,8 +820,10 @@ function App() {
   const [projecting,  setProjecting]  = useState(false);
   const [error,       setError]       = useState(null);
   const [eventsByDay, setEventsByDay] = useState({});
-  const [currentMonth, setCurrentMonth] = useState(() => {
-    const t = new Date(); return new Date(t.getFullYear(), t.getMonth(), 1);
+  const [calView,     setCalView]     = useState('month'); // 'month'|'week'|'3day'|'day'
+  const [anchorDate,  setAnchorDate]  = useState(() => {
+    const t = new Date();
+    return new Date(t.getFullYear(), t.getMonth(), 1); // first of current month
   });
   const [tooltip,     setTooltip]     = useState({ event: null, pos: { x: 0, y: 0 } });
 
@@ -784,24 +937,78 @@ function App() {
   const handleHover  = useCallback((event, pos) => setTooltip({ event, pos }), []);
   const handleLeave  = useCallback(() => setTooltip({ event: null, pos: { x: 0, y: 0 } }), []);
 
-  // ── Month navigation ─────────────────────────────────────────────────────────
-  const prevMonth = () => setCurrentMonth(m => new Date(m.getFullYear(), m.getMonth() - 1, 1));
-  const nextMonth = () => setCurrentMonth(m => new Date(m.getFullYear(), m.getMonth() + 1, 1));
-  const goToday   = () => { const t = new Date(); setCurrentMonth(new Date(t.getFullYear(), t.getMonth(), 1)); };
+  // ── View switching: normalise anchorDate for the target view ─────────────────
+  function switchView(v) {
+    setCalView(v);
+    setAnchorDate(a => {
+      const d = new Date(a.getFullYear(), a.getMonth(), a.getDate());
+      if (v === 'month') return new Date(d.getFullYear(), d.getMonth(), 1);
+      if (v === 'week')  { d.setDate(d.getDate() - d.getDay()); return d; }
+      return d; // '3day' | 'day' keep as-is
+    });
+  }
 
-  // ── Stats ─────────────────────────────────────────────────────────────────
-  const totalEvents = useMemo(() => Object.values(eventsByDay).reduce((s, a) => s + a.length, 0), [eventsByDay]);
-  const monthKey    = `${currentMonth.getFullYear()}-${currentMonth.getMonth()}`;
-  const monthEvents = useMemo(() =>
-    Object.entries(eventsByDay)
-      .filter(([k]) => k.startsWith(`${currentMonth.getFullYear()}-${currentMonth.getMonth()}-`))
-      .reduce((s, [, a]) => s + a.length, 0),
-  [eventsByDay, currentMonth]);
+  // ── Navigation (prev / next / today) ─────────────────────────────────────────
+  function navigate(dir) {
+    setAnchorDate(a => {
+      if (calView === 'month') return new Date(a.getFullYear(), a.getMonth() + dir, 1);
+      const days = calView === 'week' ? 7 : calView === '3day' ? 3 : 1;
+      return addDays(a, days * dir);
+    });
+  }
+  function goToday() {
+    const t = new Date();
+    if (calView === 'month') {
+      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
+    } else if (calView === 'week') {
+      const d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+      d.setDate(d.getDate() - d.getDay());
+      setAnchorDate(d);
+    } else {
+      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), t.getDate()));
+    }
+  }
 
-  const procItems = useMemo(() => schedules.map(s => ({ id: s.id, label: s.name })), [schedules]);
+  // ── Derive days array for time-grid views ─────────────────────────────────────
+  const viewDays = useMemo(() => {
+    if (calView === 'month') return [];
+    const count = calView === 'week' ? 7 : calView === '3day' ? 3 : 1;
+    return Array.from({ length: count }, (_, i) => addDays(anchorDate, i));
+  }, [calView, anchorDate]);
 
-  const monthLabel = currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' });
+  // ── Navigation label ──────────────────────────────────────────────────────────
+  const navLabel = useMemo(() => {
+    if (calView === 'month') {
+      return anchorDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+    }
+    if (calView === 'day') {
+      return anchorDate.toLocaleDateString('default', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    }
+    const first = viewDays[0], last = viewDays[viewDays.length - 1];
+    if (!first || !last) return '';
+    const sameMonth = first.getMonth() === last.getMonth() && first.getFullYear() === last.getFullYear();
+    const start = first.toLocaleDateString('default', { month: 'short', day: 'numeric' });
+    const end   = sameMonth
+      ? `${last.getDate()}, ${last.getFullYear()}`
+      : last.toLocaleDateString('default', { month: 'short', day: 'numeric', year: 'numeric' });
+    return `${start} – ${end}`;
+  }, [calView, anchorDate, viewDays]);
 
+  // ── Stats ─────────────────────────────────────────────────────────────────────
+  const totalEvents  = useMemo(() => Object.values(eventsByDay).reduce((s, a) => s + a.length, 0), [eventsByDay]);
+  const windowEvents = useMemo(() => {
+    if (calView === 'month') {
+      return Object.entries(eventsByDay)
+        .filter(([k]) => k.startsWith(`${anchorDate.getFullYear()}-${anchorDate.getMonth()}-`))
+        .reduce((s, [, a]) => s + a.length, 0);
+    }
+    return viewDays.reduce((s, d) => {
+      const k = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      return s + (eventsByDay[k] || []).length;
+    }, 0);
+  }, [eventsByDay, calView, anchorDate, viewDays]);
+
+  const procItems    = useMemo(() => schedules.map(s => ({ id: s.id, label: s.name })), [schedules]);
   const showSkeleton = loading || projecting;
 
   return (
@@ -857,12 +1064,28 @@ function App() {
           <span style={{ fontSize: 12, color: '#5A7A9A' }}>days</span>
         </div>
 
+        {/* View switcher */}
+        <div className="view-switcher">
+          {[
+            { key: 'month', label: 'Month' },
+            { key: 'week',  label: 'Week'  },
+            { key: '3day',  label: '3 Day' },
+            { key: 'day',   label: 'Day'   },
+          ].map(v => (
+            <button key={v.key}
+              className={`view-btn${calView === v.key ? ' active' : ''}`}
+              onClick={() => switchView(v.key)}>
+              {v.label}
+            </button>
+          ))}
+        </div>
+
         {/* Stats */}
         {!loading && schedules.length > 0 && (
           <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#5A7A9A', flexWrap: 'wrap' }}>
             <span><strong style={{ color: '#00AEEF' }}>{schedules.length}</strong> schedules</span>
             <span><strong style={{ color: '#FA4616' }}>{totalEvents}</strong> projected</span>
-            <span><strong style={{ color: '#C8D8E8' }}>{monthEvents}</strong> this month</span>
+            <span><strong style={{ color: '#C8D8E8' }}>{windowEvents}</strong> in view</span>
           </div>
         )}
 
@@ -883,43 +1106,52 @@ function App() {
 
         {/* ── Sidebar ── */}
         <aside className="sidebar">
-          <ConfigPanel
-            cfg={cfg}
-            onChange={setCfg}
-            onFetch={handleFetch}
-            loading={loading}
-            scheduleCount={schedules.length || null}
-          />
+          <CollapsibleSection
+            title="Connection"
+            defaultOpen={schedules.length === 0}
+            badge={schedules.length > 0 ? '✓' : null}
+          >
+            <ConfigPanel
+              cfg={cfg}
+              onChange={setCfg}
+              onFetch={handleFetch}
+              loading={loading}
+              scheduleCount={schedules.length || null}
+            />
+          </CollapsibleSection>
+
+          {(schedules.length > 0 || loading) && (
+            <hr style={{ border: 'none', borderTop: '1px solid #1E293B', margin: '10px 0' }} />
+          )}
 
           {schedules.length > 0 && (
             <>
-              <hr style={{ border: 'none', borderTop: '1px solid #1E293B', margin: '16px 0' }} />
-              <FilterList
-                label="Processes"
-                items={procItems}
-                selected={selectedProcs}
-                onToggle={toggleProc}
-                colorMap={colorMap}
-              />
+              <CollapsibleSection title="Processes" defaultOpen>
+                <FilterList
+                  label=""
+                  items={procItems}
+                  selected={selectedProcs}
+                  onToggle={toggleProc}
+                  colorMap={colorMap}
+                />
+              </CollapsibleSection>
               {machines.length > 0 && (
-                <>
-                  <hr style={{ border: 'none', borderTop: '1px solid #1E293B', margin: '10px 0' }} />
+                <CollapsibleSection title="Machines" defaultOpen={false}>
                   <FilterList
-                    label="Machines"
+                    label=""
                     items={machines}
                     selected={selectedMachines}
                     onToggle={toggleMachine}
                   />
-                </>
+                </CollapsibleSection>
               )}
             </>
           )}
 
-          {/* Skeleton sidebar items */}
+          {/* Skeleton sidebar items while loading */}
           {loading && (
             <>
-              <hr style={{ border: 'none', borderTop: '1px solid #1E293B', margin: '16px 0' }} />
-              <div className="section-label">Processes</div>
+              <div className="section-label" style={{ marginTop: 4 }}>Processes</div>
               {Array.from({ length: 6 }).map((_, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <div className="skeleton" style={{ width: 14, height: 14, borderRadius: 3 }} />
@@ -982,28 +1214,54 @@ function App() {
             </div>
           )}
 
-          {/* Calendar header */}
+          {/* Calendar nav bar */}
           {(schedules.length > 0 || showSkeleton) && (
-            <div className="month-nav" style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-              <button onClick={prevMonth}>‹</button>
-              <span style={{ fontWeight: 700, fontSize: 18, minWidth: 180, textAlign: 'center', color: '#C8D8E8' }}>
-                {showSkeleton ? <span className="skeleton" style={{ display: 'inline-block', width: 160, height: 20 }} /> : monthLabel}
+            <div className="month-nav" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+              <button onClick={() => navigate(-1)}>‹</button>
+              <span style={{ fontWeight: 700, fontSize: 16, minWidth: 180, textAlign: 'center', color: '#C8D8E8' }}>
+                {showSkeleton
+                  ? <span className="skeleton" style={{ display: 'inline-block', width: 160, height: 18 }} />
+                  : navLabel}
               </span>
-              <button onClick={nextMonth}>›</button>
+              <button onClick={() => navigate(1)}>›</button>
               <button className="btn-ghost" onClick={goToday}>Today</button>
             </div>
           )}
 
-          {/* Calendar grid */}
-          {showSkeleton && <CalendarSkeleton />}
-          {!showSkeleton && schedules.length > 0 && (
+          {/* Calendar grid / time-grid */}
+          {showSkeleton && calView === 'month' && <CalendarSkeleton />}
+          {showSkeleton && calView !== 'month' && (
+            <div style={{ display: 'flex', gap: 2 }}>
+              {Array.from({ length: calView === 'week' ? 7 : calView === '3day' ? 3 : 1 }).map((_, i) => (
+                <div key={i} style={{ flex: 1, minHeight: 400, background: '#0B1929',
+                  border: '1px solid #1E293B', borderRadius: 4, padding: 8 }}>
+                  <div className="skeleton" style={{ width: '40%', height: 12, marginBottom: 8 }} />
+                  <div className="skeleton" style={{ width: '70%', height: 16, marginBottom: 6 }} />
+                  <div className="skeleton" style={{ width: '55%', height: 16 }} />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!showSkeleton && schedules.length > 0 && calView === 'month' && (
             <CalendarMonth
-              month={currentMonth}
+              month={anchorDate}
               eventsByDay={eventsByDay}
               colorMap={colorMap}
               onHover={handleHover}
               onLeave={handleLeave}
             />
+          )}
+          {!showSkeleton && schedules.length > 0 && calView !== 'month' && (
+            <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 160px)', minHeight: 400 }}>
+              <CalendarTimeGrid
+                days={viewDays}
+                eventsByDay={eventsByDay}
+                colorMap={colorMap}
+                onHover={handleHover}
+                onLeave={handleLeave}
+              />
+            </div>
           )}
         </main>
       </div>

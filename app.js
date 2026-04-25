@@ -16,13 +16,6 @@ function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', proxy: 'usp_proxy', prefix: 'usp_prefix' };
 const SS_KEY  = 'usp_token';
 
-// Built-in CORS proxy presets
-const PROXY_PRESETS = [
-  { label: 'None (direct)',              value: '' },
-  { label: 'corsproxy.io',               value: 'https://corsproxy.io/?url=' },
-  { label: 'cors-anywhere (Heroku)',     value: 'https://cors-anywhere.herokuapp.com/' },
-  { label: 'Custom…',                    value: '__custom__' },
-];
 
 function loadConfig() {
   // apiPrefix: '/orchestrator_' for UiPath Cloud; '' for on-prem.
@@ -170,7 +163,7 @@ function SkeletonLine({ w = '100%', h = 14 }) {
 }
 function SkeletonCard() {
   return (
-    <div style={{ background: '#0B1929', border: '1px solid #1A3050', borderRadius: 6, padding: 8 }}>
+    <div style={{ background: '#0B1929', border: '1px solid #1E293B', borderRadius: 6, padding: 8 }}>
       <SkeletonLine w="60%" h={12} />
       <SkeletonLine w="90%" h={10} />
       <SkeletonLine w="75%" h={10} />
@@ -181,7 +174,7 @@ function CalendarSkeleton() {
   return (
     <div className="cal-grid" style={{ gap: 2 }}>
       {Array.from({ length: 35 }).map((_, i) => (
-        <div key={i} style={{ minHeight: 90, background: '#0B1929', border: '1px solid #1A3050', borderRadius: 6, padding: 4 }}>
+        <div key={i} style={{ minHeight: 90, background: '#0B1929', border: '1px solid #1E293B', borderRadius: 6, padding: 4 }}>
           <SkeletonLine w="30%" h={10} />
           {i % 3 === 0 && <SkeletonLine w="85%" h={16} />}
           {i % 5 === 0 && <SkeletonLine w="70%" h={16} />}
@@ -227,6 +220,63 @@ function Tooltip({ event, pos }) {
           <span className="tooltip-value">{schedule.tz}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Toast notification ───────────────────────────────────────────────────────
+function Toast({ error, onClose }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!error) return null;
+
+  const isCors = error === '__cors__';
+  const title   = isCors ? 'CORS / Network Error' : 'Request Failed';
+  const message = isCors
+    ? 'The browser blocked the request. Enable the proxy toggle in the sidebar.'
+    : error;
+
+  // Warning icon SVG
+  const Icon = () => (
+    <svg className="toast-icon" width="15" height="15" viewBox="0 0 24 24"
+      fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+      <line x1="12" y1="9" x2="12" y2="13"/>
+      <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+  );
+
+  return (
+    <div className="toast-container">
+      <div className="toast toast-error">
+        <Icon />
+        <div className="toast-body">
+          <div className="toast-title">{title}</div>
+          <div className="toast-message">{message}</div>
+          {isCors && (
+            <>
+              <button onClick={() => setExpanded(e => !e)}
+                style={{ background: 'none', border: 'none', color: '#00AEEF',
+                  fontSize: 10, cursor: 'pointer', padding: '3px 0 0', fontFamily: 'Inter, sans-serif' }}>
+                {expanded ? '▲ Hide fixes' : '▼ Show fixes'}
+              </button>
+              {expanded && (
+                <div className="toast-detail">
+                  <ol>
+                    <li><strong>Proxy toggle</strong> — enable "CORS Proxy" in the sidebar and click Fetch again.</li>
+                    <li><strong>cors-anywhere demo</strong> — visit <em>cors-anywhere.herokuapp.com/corsdemo</em> to unlock temporary access.</li>
+                    <li><strong>Browser extension</strong> — install <em>Allow CORS</em> for Chrome/Firefox.</li>
+                    <li><strong>On-prem</strong> — add your origin to Orchestrator's web.config CORS list.</li>
+                  </ol>
+                  <div style={{ marginTop: 6, color: '#5A7A9A' }}>
+                    Token is sent over HTTPS only.
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <button className="toast-close" onClick={onClose} title="Dismiss">×</button>
+      </div>
     </div>
   );
 }
@@ -471,22 +521,17 @@ function TokenField({ value, onChange }) {
   );
 }
 
+const CORS_ANYWHERE = 'https://cors-anywhere.herokuapp.com/';
+
 // ─── Config panel ─────────────────────────────────────────────────────────────
 function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
   const [local, setLocal] = useState(cfg);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
 
-  // Determine which preset is active (or custom)
-  const presetMatch = PROXY_PRESETS.find(
-    p => p.value !== '__custom__' && p.value === local.proxy
-  );
-  const [proxyMode, setProxyMode] = useState(
-    presetMatch ? presetMatch.value : (local.proxy ? '__custom__' : '')
-  );
-
-  function handleProxySelect(val) {
-    setProxyMode(val);
-    if (val !== '__custom__') set('proxy', val);
+  // Proxy toggle: true = use cors-anywhere, false = direct
+  const proxyOn = local.proxy === CORS_ANYWHERE;
+  function toggleProxy(enabled) {
+    set('proxy', enabled ? CORS_ANYWHERE : '');
   }
 
   function handleFetch() {
@@ -495,33 +540,37 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
     onFetch(local);
   }
 
+  const previewUrl = local.url && local.tenant
+    ? `${local.url.replace(/\/$/, '')}/${local.tenant}${local.apiPrefix || ''}/odata/ProcessSchedules`
+    : null;
+
   return (
     <div>
       <div className="section-label">Orchestrator Connection</div>
 
       <div style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>Orchestrator URL</div>
+        <div className="field-label">Orchestrator URL</div>
         <input type="text" value={local.url} onChange={e => set('url', e.target.value)}
           placeholder="https://cloud.uipath.com/org" />
       </div>
 
       <div style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>Tenant</div>
+        <div className="field-label">Tenant</div>
         <input type="text" value={local.tenant} onChange={e => set('tenant', e.target.value)}
           placeholder="Default" />
       </div>
 
       <div style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>Folder ID</div>
+        <div className="field-label">Folder ID</div>
         <input type="text" value={local.folder} onChange={e => set('folder', e.target.value)}
           placeholder="1234" />
       </div>
 
       <div style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>
+        <div className="field-label">
           Orchestrator Path
-          <span style={{ marginLeft: 6, fontSize: 10, background: '#0B1929',
-            border: '1px solid #1A3050', borderRadius: 3, padding: '1px 5px', color: '#5A7A9A' }}>
+          <span style={{ marginLeft: 6, fontSize: 10, background: '#040E19',
+            border: '1px solid #1E293B', borderRadius: 3, padding: '1px 5px', color: '#5A7A9A' }}>
             Cloud vs on-prem
           </span>
         </div>
@@ -529,71 +578,60 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
           onChange={e => set('apiPrefix', e.target.value)}
           placeholder="/orchestrator_" />
         <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 3, lineHeight: 1.5 }}>
-          <strong style={{ color: '#00AEEF' }}>Cloud:</strong> /orchestrator_ &nbsp;|&nbsp;
-          <strong style={{ color: '#00AEEF' }}>On-prem:</strong> leave blank
+          <strong style={{ color: '#00AEEF' }}>Cloud:</strong>{' '}/orchestrator_{' '}
+          &nbsp;·&nbsp;
+          <strong style={{ color: '#00AEEF' }}>On-prem:</strong>{' '}leave blank
         </div>
       </div>
 
       {/* URL preview */}
-      {local.url && local.tenant && (
-        <div style={{ marginBottom: 10, padding: '6px 8px', background: '#040E19',
-          border: '1px solid #1A3050', borderRadius: 5 }}>
-          <div style={{ fontSize: 10, color: '#5A7A9A', marginBottom: 2 }}>URL preview</div>
-          <div style={{ fontFamily: 'monospace', fontSize: 10, color: '#00AEEF',
-            wordBreak: 'break-all', lineHeight: 1.5 }}>
-            {local.url.replace(/\/$/, '')}/{local.tenant}{local.apiPrefix || ''}/odata/ProcessSchedules
-          </div>
+      {previewUrl && (
+        <div className="url-preview" style={{ marginBottom: 10 }}>
+          <div className="url-preview-label">URL Preview</div>
+          <div className="url-preview-value">{previewUrl}</div>
         </div>
       )}
 
-      <div style={{ marginBottom: 8 }}>
+      <div style={{ marginBottom: 10 }}>
         <TokenField value={local.token} onChange={v => set('token', v)} />
       </div>
 
-      {/* CORS Proxy */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>
-          CORS Proxy
-          <span style={{ marginLeft: 6, fontSize: 10, color: '#1A3050',
-            background: '#0B1929', border: '1px solid #1A3050',
-            borderRadius: 3, padding: '1px 5px' }}>
-            fixes network errors
-          </span>
-        </div>
-        <select value={proxyMode} onChange={e => handleProxySelect(e.target.value)}>
-          {PROXY_PRESETS.map(p => (
-            <option key={p.value} value={p.value}>{p.label}</option>
-          ))}
-        </select>
-        {proxyMode === '__custom__' && (
-          <input
-            type="text"
-            value={local.proxy}
-            onChange={e => set('proxy', e.target.value)}
-            placeholder="https://my-proxy.example.com/?url="
-            style={{ marginTop: 5 }}
-          />
-        )}
-        {proxyMode !== '' && proxyMode !== '__custom__' && (
-          <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 4, lineHeight: 1.5 }}>
-            Requests will be routed through <strong style={{ color: '#00AEEF' }}>{proxyMode.replace('https://','').split('/')[0]}</strong>.
-            Your token is only sent to the proxy over HTTPS.
+      <hr className="divider" />
+
+      {/* ── CORS Proxy toggle ── */}
+      <div style={{ marginBottom: 14 }}>
+        <div className="toggle-row" style={{ marginBottom: 5 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#C8D8E8' }}>CORS Proxy</div>
+            <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 1 }}>
+              Route via cors-anywhere.herokuapp.com
+            </div>
           </div>
-        )}
-        {proxyMode === '' && (
-          <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 4, lineHeight: 1.5 }}>
-            If you see a CORS error, select a proxy above or install the
-            {' '}<strong>Allow CORS</strong> browser extension.
+          <label className="toggle-switch">
+            <input type="checkbox" checked={proxyOn} onChange={e => toggleProxy(e.target.checked)} />
+            <div className="toggle-track">
+              <div className="toggle-thumb" />
+            </div>
+          </label>
+        </div>
+        {proxyOn && (
+          <div style={{ fontSize: 10, color: '#FFB800', lineHeight: 1.5,
+            background: 'rgba(255,184,0,.07)', border: '1px solid rgba(255,184,0,.2)',
+            borderRadius: 4, padding: '5px 8px' }}>
+            <strong>Note:</strong> You may need to visit{' '}
+            <strong>cors-anywhere.herokuapp.com/corsdemo</strong> once to enable
+            temporary access. Your Bearer Token travels over HTTPS.
           </div>
         )}
       </div>
 
-      <button className="btn-primary" onClick={handleFetch} disabled={loading || !local.url || !local.token}
+      <button className="btn-primary" onClick={handleFetch}
+        disabled={loading || !local.url || !local.token}
         style={{ width: '100%', justifyContent: 'center' }}>
         {loading ? 'Loading…' : scheduleCount != null ? `Reload (${scheduleCount})` : 'Fetch Schedules'}
       </button>
 
-      <div style={{ marginTop: 10, fontSize: 11, color: '#5A7A9A', lineHeight: 1.5 }}>
+      <div style={{ marginTop: 10, fontSize: 11, color: '#5A7A9A', lineHeight: 1.6 }}>
         URL, Tenant, Folder &amp; Proxy saved to localStorage.<br/>
         Token stored in sessionStorage (clears on tab close).
       </div>
@@ -855,7 +893,7 @@ function App() {
 
           {schedules.length > 0 && (
             <>
-              <hr style={{ border: 'none', borderTop: '1px solid #1A3050', margin: '16px 0' }} />
+              <hr style={{ border: 'none', borderTop: '1px solid #1E293B', margin: '16px 0' }} />
               <FilterList
                 label="Processes"
                 items={procItems}
@@ -865,7 +903,7 @@ function App() {
               />
               {machines.length > 0 && (
                 <>
-                  <hr style={{ border: 'none', borderTop: '1px solid #1A3050', margin: '10px 0' }} />
+                  <hr style={{ border: 'none', borderTop: '1px solid #1E293B', margin: '10px 0' }} />
                   <FilterList
                     label="Machines"
                     items={machines}
@@ -880,7 +918,7 @@ function App() {
           {/* Skeleton sidebar items */}
           {loading && (
             <>
-              <hr style={{ border: 'none', borderTop: '1px solid #1A3050', margin: '16px 0' }} />
+              <hr style={{ border: 'none', borderTop: '1px solid #1E293B', margin: '16px 0' }} />
               <div className="section-label">Processes</div>
               {Array.from({ length: 6 }).map((_, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
@@ -895,54 +933,6 @@ function App() {
 
         {/* ── Main content ── */}
         <main style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
-
-          {/* Error banner */}
-          {error && (
-            <div className="error-banner" style={{ marginBottom: 16, position: 'relative' }}>
-              <button
-                onClick={() => setError(null)}
-                style={{ position: 'absolute', top: 8, right: 10, background: 'none', border: 'none', color: '#FA4616', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>
-                ×
-              </button>
-
-              {error === '__cors__' ? (
-                <>
-                  <div style={{ fontWeight: 700, marginBottom: 8 }}>
-                    CORS / Network Error — browser blocked the request
-                  </div>
-                  <div style={{ fontSize: 12, lineHeight: 1.7, color: '#C8D8E8' }}>
-                    Orchestrator's API doesn't send cross-origin headers to browser clients.<br/>
-                    Pick one of these fixes:
-                  </div>
-                  <ol style={{ fontSize: 12, lineHeight: 1.9, margin: '8px 0 4px 18px', color: '#C8D8E8' }}>
-                    <li>
-                      <strong style={{ color: '#00AEEF' }}>CORS Proxy (easiest)</strong> — select
-                      {' '}<em>corsproxy.io</em> in the <strong>CORS Proxy</strong> dropdown in the sidebar,
-                      then click Fetch Schedules again.
-                    </li>
-                    <li>
-                      <strong style={{ color: '#00AEEF' }}>Browser extension</strong> — install
-                      {' '}<em>Allow CORS: Access-Control-Allow-Origin</em> for Chrome/Firefox
-                      and enable it for your Orchestrator hostname.
-                    </li>
-                    <li>
-                      <strong style={{ color: '#00AEEF' }}>Server-side proxy</strong> — host a small
-                      reverse-proxy (nginx / Cloudflare Worker) that adds CORS headers to Orchestrator responses.
-                    </li>
-                    <li>
-                      <strong style={{ color: '#00AEEF' }}>On-prem config</strong> — add your GitHub Pages
-                      origin to the Orchestrator <em>web.config</em> CORS allowed origins.
-                    </li>
-                  </ol>
-                  <div style={{ fontSize: 11, color: '#5A7A9A' }}>
-                    Note: all proxy options transmit your Bearer Token over HTTPS — use HTTPS-only proxies.
-                  </div>
-                </>
-              ) : (
-                <><strong>Error:</strong> {error}</>
-              )}
-            </div>
-          )}
 
           {/* Empty state */}
           {!loading && !error && schedules.length === 0 && (
@@ -969,7 +959,7 @@ function App() {
               ) : (
                 // ── Token present, no data yet ───────────────────────────────
                 <>
-                  <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#1A3050" strokeWidth="1.5">
+                  <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#1E293B" strokeWidth="1.5">
                     <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
                     <line x1="16" y1="2" x2="16" y2="6"/>
                     <line x1="8"  y1="2" x2="8"  y2="6"/>
@@ -1020,6 +1010,9 @@ function App() {
 
       {/* Tooltip portal */}
       <Tooltip event={tooltip.event} pos={tooltip.pos} />
+
+      {/* Toast portal – fixed top-right */}
+      <Toast error={error} onClose={() => setError(null)} />
     </div>
   );
 }

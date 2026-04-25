@@ -353,6 +353,104 @@ function FilterList({ label, items, selected, onToggle, colorMap }) {
   );
 }
 
+// ─── Token field with show/hide, paste, and status dot ───────────────────────
+function TokenField({ value, onChange }) {
+  const [show,   setShow]   = useState(false);
+  const [pasted, setPasted] = useState(false);
+  const hasToken = value.length > 0;
+  const hint     = hasToken ? `…${value.slice(-6)}` : null;
+
+  async function handlePaste() {
+    try {
+      const text = await navigator.clipboard.readText();
+      const trimmed = text.trim();
+      if (trimmed) {
+        onChange(trimmed);
+        setPasted(true);
+        setTimeout(() => setPasted(false), 2000);
+      }
+    } catch (_) { /* clipboard permission denied – user pastes manually */ }
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+        {/* Live status dot */}
+        <span style={{
+          width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+          background: hasToken ? '#00C48C' : '#FA4616',
+          boxShadow: hasToken ? '0 0 6px #00C48C88' : '0 0 6px #FA461688',
+          transition: 'background .3s, box-shadow .3s',
+        }} />
+        <span style={{ fontSize: 12, color: '#5A7A9A', flex: 1 }}>
+          Personal Access Token
+          {' '}<span style={{ color: '#FA4616', fontSize: 10 }}>(session only)</span>
+        </span>
+        {/* Masked hint of current token */}
+        {hint && (
+          <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#5A7A9A' }}>{hint}</span>
+        )}
+      </div>
+
+      <div style={{ position: 'relative' }}>
+        <input
+          type={show ? 'text' : 'password'}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder="Paste your PAT here…"
+          autoComplete="off"
+          style={{ paddingRight: 58 }}
+        />
+
+        {/* Show / hide toggle */}
+        <button type="button" onClick={() => setShow(s => !s)}
+          title={show ? 'Hide token' : 'Show token'}
+          style={{ position: 'absolute', right: 30, top: '50%', transform: 'translateY(-50%)',
+            background: 'none', border: 'none', padding: '2px 4px',
+            color: '#5A7A9A', cursor: 'pointer', lineHeight: 1 }}>
+          {show ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+              <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+              <line x1="1" y1="1" x2="23" y2="23"/>
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          )}
+        </button>
+
+        {/* Paste from clipboard */}
+        <button type="button" onClick={handlePaste}
+          title={pasted ? 'Pasted!' : 'Paste from clipboard'}
+          style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
+            background: 'none', border: 'none', padding: '2px 4px',
+            color: pasted ? '#00C48C' : '#5A7A9A', cursor: 'pointer',
+            lineHeight: 1, transition: 'color .2s' }}>
+          {pasted ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+              <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+            </svg>
+          )}
+        </button>
+      </div>
+
+      {!hasToken && (
+        <div style={{ fontSize: 10, color: '#FA4616', marginTop: 3, lineHeight: 1.4 }}>
+          Required — generate a PAT in UiPath Cloud → My Profile → Personal Access Tokens.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Config panel ─────────────────────────────────────────────────────────────
 function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
   const [local, setLocal] = useState(cfg);
@@ -400,11 +498,7 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
       </div>
 
       <div style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 12, color: '#5A7A9A', marginBottom: 3 }}>
-          Bearer Token <span style={{ color: '#FA4616', fontSize: 10 }}>(session only)</span>
-        </div>
-        <input type="password" value={local.token} onChange={e => set('token', e.target.value)}
-          placeholder="eyJ…" />
+        <TokenField value={local.token} onChange={v => set('token', v)} />
       </div>
 
       {/* CORS Proxy */}
@@ -640,6 +734,24 @@ function App() {
           </span>
         </div>
 
+        {/* PAT status badge */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 5, fontSize: 11,
+          background: cfg.token ? 'rgba(0,196,140,.1)' : 'rgba(250,70,22,.1)',
+          border: `1px solid ${cfg.token ? 'rgba(0,196,140,.3)' : 'rgba(250,70,22,.4)'}`,
+          borderRadius: 20, padding: '4px 10px', whiteSpace: 'nowrap', flexShrink: 0,
+          transition: 'background .3s, border-color .3s',
+        }}>
+          <span style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: cfg.token ? '#00C48C' : '#FA4616',
+            boxShadow: cfg.token ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
+          }} />
+          <span style={{ color: cfg.token ? '#00C48C' : '#FA4616', fontWeight: 600 }}>
+            {cfg.token ? `PAT …${cfg.token.slice(-4)}` : 'No token'}
+          </span>
+        </div>
+
         {/* Projection days */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, color: '#5A7A9A', whiteSpace: 'nowrap' }}>
@@ -786,16 +898,48 @@ function App() {
           {/* Empty state */}
           {!loading && !error && schedules.length === 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 16, color: '#5A7A9A' }}>
-              <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#1A3050" strokeWidth="1.5">
-                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
-                <line x1="16" y1="2" x2="16" y2="6"/>
-                <line x1="8"  y1="2" x2="8"  y2="6"/>
-                <line x1="3"  y1="10" x2="21" y2="10"/>
-              </svg>
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6, color: '#C8D8E8' }}>No schedules loaded</div>
-                <div style={{ fontSize: 13 }}>Configure your Orchestrator connection in the sidebar and click <strong>Fetch Schedules</strong>.</div>
-              </div>
+              {!cfg.token ? (
+                // ── No token at all ──────────────────────────────────────────
+                <>
+                  <div style={{ padding: '20px 24px', background: 'rgba(250,70,22,.08)',
+                    border: '1px solid rgba(250,70,22,.3)', borderRadius: 10, maxWidth: 400, textAlign: 'center' }}>
+                    <div style={{ fontSize: 28, marginBottom: 8 }}>🔑</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: '#FA4616', marginBottom: 8 }}>
+                      Personal Access Token required
+                    </div>
+                    <div style={{ fontSize: 13, lineHeight: 1.6, color: '#C8D8E8' }}>
+                      Paste your UiPath PAT into the <strong>Personal Access Token</strong> field
+                      in the sidebar, then fill in the Orchestrator URL and click{' '}
+                      <strong>Fetch Schedules</strong>.
+                    </div>
+                    <div style={{ fontSize: 11, color: '#5A7A9A', marginTop: 10 }}>
+                      Generate a PAT: UiPath Cloud → My Profile → Personal Access Tokens → + New
+                    </div>
+                  </div>
+                </>
+              ) : (
+                // ── Token present, no data yet ───────────────────────────────
+                <>
+                  <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#1A3050" strokeWidth="1.5">
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                    <line x1="16" y1="2" x2="16" y2="6"/>
+                    <line x1="8"  y1="2" x2="8"  y2="6"/>
+                    <line x1="3"  y1="10" x2="21" y2="10"/>
+                  </svg>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6, color: '#C8D8E8' }}>
+                      No schedules loaded
+                    </div>
+                    <div style={{ fontSize: 13 }}>
+                      Enter your Orchestrator URL and Folder ID in the sidebar,
+                      then click <strong>Fetch Schedules</strong>.
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 12, color: '#00C48C' }}>
+                      ✓ Token is set
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
 

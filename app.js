@@ -61,15 +61,26 @@ async function apiFetch(cfg, path, params = {}) {
   const headers = {
     'Authorization': `Bearer ${cfg.token}`,
     'Content-Type':  'application/json',
-    'X-UIPATH-OrganizationUnitId': cfg.folder,
   };
+  if (cfg.folder) headers['X-UIPATH-OrganizationUnitId'] = cfg.folder;
 
   const res = await fetch(fullUrl, { headers });
-  if (res.status === 401) throw new Error('401: Token expired or invalid. Please re-enter your Bearer Token.');
+  if (res.status === 401) throw new Error(
+    '401: Token expired or invalid. Re-enter your Bearer Token.'
+  );
+  if (res.status === 403) throw new Error(
+    `403: Forbidden — access denied.\nURL: ${apiUrl}\n\n` +
+    `Common causes:\n` +
+    `• PAT is missing required scopes — add OR.Execution, OR.Monitoring, or OR.Jobs (read) scopes when generating the token\n` +
+    `• Folder ID is wrong or the token has no access to that folder — try leaving Folder ID blank to use the default folder\n` +
+    `• The Orchestrator user account lacks the "View" permission on Schedules`
+  );
   if (res.status === 400) throw new Error(
-    `400: Bad Request.\nAttempted URL: ${apiUrl}\n\nCommon causes:\n` +
+    `400: Bad Request.\nURL: ${apiUrl}\n\n` +
+    `Common causes:\n` +
     `• Orchestrator Path is wrong — Cloud uses /orchestrator_, on-prem is usually empty\n` +
-    `• Tenant name is incorrect\n• Folder ID does not exist in this tenant`
+    `• Tenant name is incorrect\n` +
+    `• Folder ID does not exist in this tenant`
   );
   if (!res.ok) throw new Error(`HTTP ${res.status} – ${res.statusText}\nURL: ${apiUrl}`);
   return res.json();
@@ -828,14 +839,15 @@ function App() {
         const batch = raw.slice(i, i + BATCH);
         const results = await Promise.allSettled(
           batch.map(async s => {
-            const jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name);
+            let jobs = [];
+            try { jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name); } catch (_) {}
             return {
               id:      s.Id,
               name:    s.ReleaseName || s.Name,
               cron:    s.StartProcessCron,
               tz:      s.TimeZoneId,
               machine: s.MachineRobotAssignment || null,
-              medianMs: medianDurationMs(jobs),
+              medianMs: medianDurationMs(jobs), // falls back to 5 min when jobs is []
             };
           })
         );

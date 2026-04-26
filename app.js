@@ -54,7 +54,22 @@ async function proxyFetch(cfg, action, extra = {}) {
       ...extra,
     }),
   });
-  const data = await res.json();
+
+  // Read as text first so we control the parse error message
+  const text = await res.text();
+  if (!text) {
+    throw new Error(
+      `Empty response from /api/fetch-uipath (HTTP ${res.status}). ` +
+      `Ensure the Cloudflare Pages Function is deployed and the route is correct.`
+    );
+  }
+
+  let data;
+  try { data = JSON.parse(text); }
+  catch {
+    throw new Error(`Non-JSON response from proxy (HTTP ${res.status}): ${text.slice(0, 120)}`);
+  }
+
   if (!data.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data.value;
 }
@@ -950,7 +965,8 @@ function App() {
         const results = await Promise.allSettled(
           batch.map(async s => {
             let jobs = [];
-            try { jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name); } catch (_) {}
+            try { jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name); }
+            catch (e) { console.warn('[USV] Job history unavailable for', s.ReleaseName || s.Name, '—', e.message); }
             return {
               id:      s.Id,
               name:    s.ReleaseName || s.Name,

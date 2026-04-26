@@ -108,6 +108,8 @@ export async function onRequestPost({ request }) {
   }
 
   // ── 5. Map upstream errors ────────────────────────────────────────────────
+  // Always return HTTP 200 from our function so Cloudflare's edge never strips
+  // the response body. The real Orchestrator status is embedded in the JSON.
   if (!upstreamRes.ok) {
     const { status } = upstreamRes;
     let error;
@@ -120,7 +122,7 @@ export async function onRequestPost({ request }) {
     } else {
       error = `HTTP ${status} from Orchestrator`;
     }
-    return json({ ok: false, error, status }, status);
+    return json({ ok: false, error, status });
   }
 
   // ── 6. Return data ───────────────────────────────────────────────────────

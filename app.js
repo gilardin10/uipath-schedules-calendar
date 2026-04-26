@@ -13,7 +13,7 @@ const PALETTE = [
 function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 
 // ─── localStorage / sessionStorage helpers ────────────────────────────────────
-const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', proxy: 'usp_proxy', prefix: 'usp_prefix' };
+const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', proxy: 'usp_proxy', prefix: 'usp_prefix', theme: 'usp_theme', uiTz: 'usp_ui_tz' };
 const SS_KEY  = 'usp_token';
 
 
@@ -121,28 +121,123 @@ function medianDurationMs(jobs) {
     : (durations[mid - 1] + durations[mid]) / 2;
 }
 
+// ─── Windows TZ name → IANA mapping ──────────────────────────────────────────
+const WIN_TO_IANA = {
+  'Dateline Standard Time':'Etc/GMT+12','UTC-11':'Etc/GMT+11',
+  'Aleutian Standard Time':'America/Adak','Hawaiian Standard Time':'Pacific/Honolulu',
+  'Marquesas Standard Time':'Pacific/Marquesas','Alaskan Standard Time':'America/Anchorage',
+  'UTC-09':'Etc/GMT+9','Pacific Standard Time (Mexico)':'America/Santa_Isabel',
+  'UTC-08':'Etc/GMT+8','Pacific Standard Time':'America/Los_Angeles',
+  'US Mountain Standard Time':'America/Phoenix','Mountain Standard Time (Mexico)':'America/Chihuahua',
+  'Mountain Standard Time':'America/Denver','Central America Standard Time':'America/Guatemala',
+  'Central Standard Time':'America/Chicago','Easter Island Standard Time':'Pacific/Easter',
+  'Central Standard Time (Mexico)':'America/Mexico_City','Canada Central Standard Time':'America/Regina',
+  'SA Pacific Standard Time':'America/Bogota','Eastern Standard Time (Mexico)':'America/Cancun',
+  'Eastern Standard Time':'America/New_York','Haiti Standard Time':'America/Port-au-Prince',
+  'Cuba Standard Time':'America/Havana','US Eastern Standard Time':'America/Indianapolis',
+  'Turks And Caicos Standard Time':'America/Grand_Turk','Paraguay Standard Time':'America/Asuncion',
+  'Atlantic Standard Time':'America/Halifax','Venezuela Standard Time':'America/Caracas',
+  'Central Brazilian Standard Time':'America/Cuiaba','SA Western Standard Time':'America/La_Paz',
+  'Pacific SA Standard Time':'America/Santiago','Newfoundland Standard Time':'America/St_Johns',
+  'Tocantins Standard Time':'America/Araguaina','E. South America Standard Time':'America/Sao_Paulo',
+  'SA Eastern Standard Time':'America/Cayenne','Argentina Standard Time':'America/Buenos_Aires',
+  'Greenland Standard Time':'America/Godthab','Montevideo Standard Time':'America/Montevideo',
+  'Magallanes Standard Time':'America/Punta_Arenas','Saint Pierre Standard Time':'America/Miquelon',
+  'Bahia Standard Time':'America/Bahia','UTC-02':'Etc/GMT+2','Azores Standard Time':'Atlantic/Azores',
+  'Cape Verde Standard Time':'Atlantic/Cape_Verde','UTC':'UTC',
+  'GMT Standard Time':'Europe/London','Greenwich Standard Time':'Atlantic/Reykjavik',
+  'Sao Tome Standard Time':'Africa/Sao_Tome','Morocco Standard Time':'Africa/Casablanca',
+  'W. Europe Standard Time':'Europe/Berlin','Central Europe Standard Time':'Europe/Budapest',
+  'Romance Standard Time':'Europe/Paris','Central European Standard Time':'Europe/Warsaw',
+  'W. Central Africa Standard Time':'Africa/Lagos','Jordan Standard Time':'Asia/Amman',
+  'GTB Standard Time':'Europe/Bucharest','Middle East Standard Time':'Asia/Beirut',
+  'Egypt Standard Time':'Africa/Cairo','E. Europe Standard Time':'Asia/Nicosia',
+  'Syria Standard Time':'Asia/Damascus','West Bank Standard Time':'Asia/Hebron',
+  'South Africa Standard Time':'Africa/Johannesburg','FLE Standard Time':'Europe/Kiev',
+  'Israel Standard Time':'Asia/Jerusalem','Kaliningrad Standard Time':'Europe/Kaliningrad',
+  'Sudan Standard Time':'Africa/Khartoum','Libya Standard Time':'Africa/Tripoli',
+  'Namibia Standard Time':'Africa/Windhoek','Arabic Standard Time':'Asia/Baghdad',
+  'Turkey Standard Time':'Europe/Istanbul','Arab Standard Time':'Asia/Riyadh',
+  'Belarus Standard Time':'Europe/Minsk','Russian Standard Time':'Europe/Moscow',
+  'E. Africa Standard Time':'Africa/Nairobi','Iran Standard Time':'Asia/Tehran',
+  'Arabian Standard Time':'Asia/Dubai','Astrakhan Standard Time':'Europe/Astrakhan',
+  'Azerbaijan Standard Time':'Asia/Baku','Russia Time Zone 3':'Europe/Samara',
+  'Mauritius Standard Time':'Indian/Mauritius','Saratov Standard Time':'Europe/Saratov',
+  'Georgian Standard Time':'Asia/Tbilisi','Volgograd Standard Time':'Europe/Volgograd',
+  'Caucasus Standard Time':'Asia/Yerevan','Afghanistan Standard Time':'Asia/Kabul',
+  'West Asia Standard Time':'Asia/Tashkent','Ekaterinburg Standard Time':'Asia/Yekaterinburg',
+  'Pakistan Standard Time':'Asia/Karachi','Qyzylorda Standard Time':'Asia/Qyzylorda',
+  'India Standard Time':'Asia/Calcutta','Sri Lanka Standard Time':'Asia/Colombo',
+  'Nepal Standard Time':'Asia/Katmandu','Central Asia Standard Time':'Asia/Almaty',
+  'Bangladesh Standard Time':'Asia/Dhaka','Omsk Standard Time':'Asia/Omsk',
+  'Myanmar Standard Time':'Asia/Rangoon','SE Asia Standard Time':'Asia/Bangkok',
+  'Altai Standard Time':'Asia/Barnaul','W. Mongolia Standard Time':'Asia/Hovd',
+  'N. Central Asia Standard Time':'Asia/Novosibirsk','Tomsk Standard Time':'Asia/Tomsk',
+  'China Standard Time':'Asia/Shanghai','North Asia Standard Time':'Asia/Krasnoyarsk',
+  'Singapore Standard Time':'Asia/Singapore','W. Australia Standard Time':'Australia/Perth',
+  'Taipei Standard Time':'Asia/Taipei','Ulaanbaatar Standard Time':'Asia/Ulaanbaatar',
+  'North Asia East Standard Time':'Asia/Irkutsk','Japan Standard Time':'Asia/Tokyo',
+  'Korea Standard Time':'Asia/Seoul','Transbaikal Standard Time':'Asia/Chita',
+  'Tokyo Standard Time':'Asia/Tokyo','Yakutsk Standard Time':'Asia/Yakutsk',
+  'Cen. Australia Standard Time':'Australia/Adelaide','AUS Central Standard Time':'Australia/Darwin',
+  'E. Australia Standard Time':'Australia/Brisbane','AUS Eastern Standard Time':'Australia/Sydney',
+  'West Pacific Standard Time':'Pacific/Port_Moresby','Tasmania Standard Time':'Australia/Hobart',
+  'Vladivostok Standard Time':'Asia/Vladivostok','Lord Howe Standard Time':'Australia/Lord_Howe',
+  'Bougainville Standard Time':'Pacific/Bougainville','Russia Time Zone 10':'Asia/Srednekolymsk',
+  'Magadan Standard Time':'Asia/Magadan','Norfolk Standard Time':'Pacific/Norfolk',
+  'Sakhalin Standard Time':'Asia/Sakhalin','Central Pacific Standard Time':'Pacific/Guadalcanal',
+  'Russia Time Zone 11':'Asia/Kamchatka','New Zealand Standard Time':'Pacific/Auckland',
+  'UTC+12':'Etc/GMT-12','Fiji Standard Time':'Pacific/Fiji',
+  'Chatham Islands Standard Time':'Pacific/Chatham','UTC+13':'Etc/GMT-13',
+  'Tonga Standard Time':'Pacific/Tongatapu','Samoa Standard Time':'Pacific/Apia',
+  'Line Islands Standard Time':'Pacific/Kiritimati',
+};
+
+function toIanaTimezone(tz) {
+  if (!tz) return null;
+  if (WIN_TO_IANA[tz]) return WIN_TO_IANA[tz];
+  try { new Intl.DateTimeFormat('en', { timeZone: tz }); return tz; }
+  catch (_) { console.warn('[USV] Unknown timezone:', tz); return null; }
+}
+
+function normalizeQuartzCron(expr) {
+  if (!expr) return null;
+  let parts = expr.trim().split(/\s+/);
+  if (parts.length === 7) parts = parts.slice(0, 6); // strip year field
+  if (parts.length < 5 || parts.length > 6) {
+    console.warn('[USV] Unexpected cron field count', parts.length, ':', expr);
+    return null;
+  }
+  parts = parts.map(p => p === '?' ? '*' : p);
+  const joined = parts.join(' ');
+  if (/[LW#]/.test(joined)) {
+    console.warn('[USV] Unsupported Quartz modifier (L/W/#), skipping:', expr);
+    return null;
+  }
+  return joined;
+}
+
 // ─── CRON projection (uses Croner UMD global `Cron`) ─────────────────────────
-function projectSchedule(cronExpr, tzId, days, medianMs) {
+function projectSchedule(cronExpr, tzId, days, medianMs, uiTimezone) {
   const results = [];
+  const norm = normalizeQuartzCron(cronExpr);
+  if (!norm) return results;
   try {
     if (typeof Cron === 'undefined') return results;
-
     const now = new Date();
     const end = new Date(now.getTime() + days * 86400000);
-
     const opts = { startAt: now, stopAt: end };
-    if (tzId) opts.timezone = tzId;
-
-    const job = Cron(cronExpr, opts);
-
-    // nextRuns(n, from) returns up to n Date objects starting after `from`
-    // Use 2000 as hard cap then filter to window
+    const ianaZone = toIanaTimezone(tzId) || toIanaTimezone(uiTimezone);
+    if (ianaZone) opts.timezone = ianaZone;
+    const job = Cron(norm, opts);
     const dates = job.nextRuns(2000, now);
     for (const start of dates) {
       if (start > end) break;
       results.push({ start, end: new Date(start.getTime() + medianMs) });
     }
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[USV] projectSchedule error:', e.message, '| cron:', cronExpr, '→', norm);
+  }
   return results;
 }
 
@@ -215,7 +310,7 @@ function SkeletonLine({ w = '100%', h = 14 }) {
 }
 function SkeletonCard() {
   return (
-    <div style={{ background: '#0B1929', border: '1px solid #1E293B', borderRadius: 6, padding: 8 }}>
+    <div style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)', borderRadius: 6, padding: 8 }}>
       <SkeletonLine w="60%" h={12} />
       <SkeletonLine w="90%" h={10} />
       <SkeletonLine w="75%" h={10} />
@@ -226,7 +321,7 @@ function CalendarSkeleton() {
   return (
     <div className="cal-grid" style={{ gap: 2 }}>
       {Array.from({ length: 35 }).map((_, i) => (
-        <div key={i} style={{ minHeight: 90, background: '#0B1929', border: '1px solid #1E293B', borderRadius: 6, padding: 4 }}>
+        <div key={i} style={{ minHeight: 90, background: 'var(--c-surface)', border: '1px solid var(--c-border)', borderRadius: 6, padding: 4 }}>
           <SkeletonLine w="30%" h={10} />
           {i % 3 === 0 && <SkeletonLine w="85%" h={16} />}
           {i % 5 === 0 && <SkeletonLine w="70%" h={16} />}
@@ -307,7 +402,7 @@ function Toast({ error, onClose }) {
           {isCors && (
             <>
               <button onClick={() => setExpanded(e => !e)}
-                style={{ background: 'none', border: 'none', color: '#00AEEF',
+                style={{ background: 'none', border: 'none', color: 'var(--c-blue)',
                   fontSize: 10, cursor: 'pointer', padding: '3px 0 0', fontFamily: 'Inter, sans-serif' }}>
                 {expanded ? '▲ Hide fixes' : '▼ Show fixes'}
               </button>
@@ -319,7 +414,7 @@ function Toast({ error, onClose }) {
                     <li><strong>Browser extension</strong> — install <em>Allow CORS</em> for Chrome/Firefox.</li>
                     <li><strong>On-prem</strong> — add your origin to Orchestrator's web.config CORS list.</li>
                   </ol>
-                  <div style={{ marginTop: 6, color: '#5A7A9A' }}>
+                  <div style={{ marginTop: 6, color: 'var(--c-muted)' }}>
                     Token is sent over HTTPS only.
                   </div>
                 </div>
@@ -362,7 +457,7 @@ function CalDay({ date, events, colorMap, isToday, isOtherMonth, onHover, onLeav
         <EventChip
           key={i}
           event={ev}
-          color={colorMap[ev.schedule.id] || '#5A7A9A'}
+          color={colorMap[ev.schedule.id] || 'var(--c-muted)'}
           onHover={onHover}
           onLeave={onLeave}
         />
@@ -404,7 +499,7 @@ function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave }) {
       {/* Weekday headers */}
       <div className="cal-grid" style={{ gap: 2, marginBottom: 4 }}>
         {WEEK_DAYS.map(d => (
-          <div key={d} style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: '#5A7A9A', padding: '4px 0' }}>
+          <div key={d} style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'var(--c-muted)', padding: '4px 0' }}>
             {d}
           </div>
         ))}
@@ -488,7 +583,7 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
 
             return (
               <div key={di} className="tg-col"
-                style={{ background: isToday ? 'rgba(250,70,22,.018)' : 'transparent' }}>
+                style={{ background: isToday ? 'var(--c-today-tint)' : 'transparent' }}>
 
                 {/* Hour lines */}
                 {Array.from({ length: 24 }, (_, h) => (
@@ -512,7 +607,7 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
                   const durMin   = Math.max((ev.occurrence.end - ev.occurrence.start) / 60000, 15);
                   const topPx    = (startMin / 60) * HOUR_H;
                   const heightPx = Math.max((durMin / 60) * HOUR_H - 2, 18);
-                  const color    = colorMap[ev.schedule.id] || '#5A7A9A';
+                  const color    = colorMap[ev.schedule.id] || 'var(--c-muted)';
                   const pct      = 100 / totalCols;
                   return (
                     <div key={i} className="tg-event"
@@ -579,7 +674,7 @@ function FilterList({ label, items, selected, onToggle, colorMap }) {
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.label}</span>
           </label>
         ))}
-        {!filtered.length && <div style={{ color: '#5A7A9A', fontSize: 12 }}>No matches</div>}
+        {!filtered.length && <div style={{ color: 'var(--c-muted)', fontSize: 12 }}>No matches</div>}
       </div>
     </div>
   );
@@ -614,13 +709,13 @@ function TokenField({ value, onChange }) {
           boxShadow: hasToken ? '0 0 6px #00C48C88' : '0 0 6px #FA461688',
           transition: 'background .3s, box-shadow .3s',
         }} />
-        <span style={{ fontSize: 12, color: '#5A7A9A', flex: 1 }}>
+        <span style={{ fontSize: 12, color: 'var(--c-muted)', flex: 1 }}>
           Personal Access Token
           {' '}<span style={{ color: '#FA4616', fontSize: 10 }}>(session only)</span>
         </span>
         {/* Masked hint of current token */}
         {hint && (
-          <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#5A7A9A' }}>{hint}</span>
+          <span style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--c-muted)' }}>{hint}</span>
         )}
       </div>
 
@@ -639,7 +734,7 @@ function TokenField({ value, onChange }) {
           title={show ? 'Hide token' : 'Show token'}
           style={{ position: 'absolute', right: 30, top: '50%', transform: 'translateY(-50%)',
             background: 'none', border: 'none', padding: '2px 4px',
-            color: '#5A7A9A', cursor: 'pointer', lineHeight: 1 }}>
+            color: 'var(--c-muted)', cursor: 'pointer', lineHeight: 1 }}>
           {show ? (
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
@@ -659,7 +754,7 @@ function TokenField({ value, onChange }) {
           title={pasted ? 'Pasted!' : 'Paste from clipboard'}
           style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
             background: 'none', border: 'none', padding: '2px 4px',
-            color: pasted ? '#00C48C' : '#5A7A9A', cursor: 'pointer',
+            color: pasted ? '#00C48C' : 'var(--c-muted)', cursor: 'pointer',
             lineHeight: 1, transition: 'color .2s' }}>
           {pasted ? (
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -723,18 +818,18 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
       <div style={{ marginBottom: 8 }}>
         <div className="field-label">
           Orchestrator Path
-          <span style={{ marginLeft: 6, fontSize: 10, background: '#040E19',
-            border: '1px solid #1E293B', borderRadius: 3, padding: '1px 5px', color: '#5A7A9A' }}>
+          <span style={{ marginLeft: 6, fontSize: 10, background: 'var(--c-bg)',
+            border: '1px solid var(--c-border)', borderRadius: 3, padding: '1px 5px', color: 'var(--c-muted)' }}>
             Cloud vs on-prem
           </span>
         </div>
         <input type="text" value={local.apiPrefix}
           onChange={e => set('apiPrefix', e.target.value)}
           placeholder="/orchestrator_" />
-        <div style={{ fontSize: 10, color: '#5A7A9A', marginTop: 3, lineHeight: 1.5 }}>
-          <strong style={{ color: '#00AEEF' }}>Cloud:</strong>{' '}/orchestrator_{' '}
+        <div style={{ fontSize: 10, color: 'var(--c-muted)', marginTop: 3, lineHeight: 1.5 }}>
+          <strong style={{ color: 'var(--c-blue)' }}>Cloud:</strong>{' '}/orchestrator_{' '}
           &nbsp;·&nbsp;
-          <strong style={{ color: '#00AEEF' }}>On-prem:</strong>{' '}leave blank
+          <strong style={{ color: 'var(--c-blue)' }}>On-prem:</strong>{' '}leave blank
         </div>
       </div>
 
@@ -756,7 +851,7 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
         {loading ? 'Loading…' : scheduleCount != null ? `Reload (${scheduleCount})` : 'Fetch Schedules'}
       </button>
 
-      <div style={{ marginTop: 10, fontSize: 11, color: '#5A7A9A', lineHeight: 1.6 }}>
+      <div style={{ marginTop: 10, fontSize: 11, color: 'var(--c-muted)', lineHeight: 1.6 }}>
         URL, Tenant, Folder &amp; Proxy saved to localStorage.<br/>
         Token stored in sessionStorage (clears on tab close).
       </div>
@@ -783,9 +878,35 @@ function Legend({ schedules, colorMap, selectedProcs, onToggle }) {
   );
 }
 
+// ─── Timezone dropdown ────────────────────────────────────────────────────────
+function TzDropdown({ value, onChange }) {
+  const tzList = useMemo(() => {
+    try { return Intl.supportedValuesOf('timeZone'); } catch (_) { return []; }
+  }, []);
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div className="field-label">Display Timezone</div>
+      <input type="text" list="tz-datalist" value={value} onChange={e => onChange(e.target.value)}
+        placeholder="e.g. America/New_York" />
+      {tzList.length > 0 && (
+        <datalist id="tz-datalist">
+          {tzList.map(tz => <option key={tz} value={tz} />)}
+        </datalist>
+      )}
+      <div style={{ fontSize: 10, color: 'var(--c-muted)', marginTop: 3, lineHeight: 1.5 }}>
+        Fallback when a schedule has no configured timezone.
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 function App() {
   const [cfg,         setCfg]         = useState(loadConfig);
+  const [theme,       setTheme]       = useState(() => localStorage.getItem(LS_KEYS.theme) || 'dark');
+  const [uiTimezone,  setUiTimezone]  = useState(() =>
+    localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone
+  );
   const [schedules,   setSchedules]   = useState([]);
   const [colorMap,    setColorMap]    = useState({});
   const [selectedProcs, setSelectedProcs] = useState(new Set());
@@ -813,6 +934,17 @@ function App() {
   }, [schedules]);
 
   const [selectedMachines, setSelectedMachines] = useState(new Set());
+
+  useEffect(() => {
+    if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem(LS_KEYS.theme, theme);
+  }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_KEYS.uiTz, uiTimezone);
+  }, [uiTimezone]);
+
   useEffect(() => {
     setSelectedMachines(new Set(machines.map(m => m.id)));
   }, [machines]);
@@ -883,7 +1015,7 @@ function App() {
 
       filtered.forEach(s => {
         if (!s.cron) return;
-        const occurrences = projectSchedule(s.cron, s.tz, projDays, s.medianMs);
+        const occurrences = projectSchedule(s.cron, s.tz, projDays, s.medianMs, uiTimezone);
         occurrences.forEach(occ => {
           const d = occ.start;
           const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
@@ -902,7 +1034,7 @@ function App() {
     }, 20);
 
     return () => clearTimeout(tid);
-  }, [schedules, selectedProcs, selectedMachines, projDays]);
+  }, [schedules, selectedProcs, selectedMachines, projDays, uiTimezone]);
 
   // ── Toggle helpers ───────────────────────────────────────────────────────────
   const toggleProc    = id => setSelectedProcs(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -993,12 +1125,21 @@ function App() {
       <header className="app-header">
         {/* Logo / title */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
-          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-            <rect width="28" height="28" rx="6" fill="#FA4616"/>
-            <path d="M6 22 L14 6 L22 22" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M9 17 H19" stroke="white" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-          <span style={{ fontWeight: 700, fontSize: 16, color: '#C8D8E8', letterSpacing: '.02em' }}>
+          <div style={{ width: 28, height: 28, borderRadius: 6, background: '#FA4616', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+              <line x1="16" y1="2" x2="16" y2="6"/>
+              <line x1="8" y1="2" x2="8" y2="6"/>
+              <line x1="3" y1="10" x2="21" y2="10"/>
+              <line x1="8" y1="14" x2="8.01" y2="14"/>
+              <line x1="12" y1="14" x2="12.01" y2="14"/>
+              <line x1="16" y1="14" x2="16.01" y2="14"/>
+              <line x1="8" y1="18" x2="8.01" y2="18"/>
+              <line x1="12" y1="18" x2="12.01" y2="18"/>
+              <line x1="16" y1="18" x2="16.01" y2="18"/>
+            </svg>
+          </div>
+          <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--c-text)', letterSpacing: '.02em' }}>
             UiPath Schedule Visualizer
           </span>
         </div>
@@ -1022,21 +1163,14 @@ function App() {
         </div>
 
         {/* Projection days */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, color: '#5A7A9A', whiteSpace: 'nowrap' }}>
-            Projection:
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>
+            Projection Period (Days)
           </span>
-          <input
-            type="range" min="1" max="365" value={projDays}
-            onChange={e => setProjDays(Number(e.target.value))}
-            style={{ width: 120 }}
-          />
-          <input
-            type="number" min="1" max="365" value={projDays}
-            onChange={e => setProjDays(Math.max(1, Math.min(365, Number(e.target.value))))}
-            style={{ width: 60, textAlign: 'center' }}
-          />
-          <span style={{ fontSize: 12, color: '#5A7A9A' }}>days</span>
+          <select value={projDays} onChange={e => setProjDays(Number(e.target.value))}
+            style={{ width: 'auto', padding: '5px 8px', fontSize: 12 }}>
+            {[30,60,90,120,365].map(d => <option key={d} value={d}>{d}</option>)}
+          </select>
         </div>
 
         {/* View switcher */}
@@ -1057,10 +1191,10 @@ function App() {
 
         {/* Stats */}
         {!loading && schedules.length > 0 && (
-          <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#5A7A9A', flexWrap: 'wrap' }}>
-            <span><strong style={{ color: '#00AEEF' }}>{schedules.length}</strong> schedules</span>
+          <div style={{ display: 'flex', gap: 16, fontSize: 12, color: 'var(--c-muted)', flexWrap: 'wrap' }}>
+            <span><strong style={{ color: 'var(--c-blue)' }}>{schedules.length}</strong> schedules</span>
             <span><strong style={{ color: '#FA4616' }}>{totalEvents}</strong> projected</span>
-            <span><strong style={{ color: '#C8D8E8' }}>{windowEvents}</strong> in view</span>
+            <span><strong style={{ color: 'var(--c-text)' }}>{windowEvents}</strong> in view</span>
           </div>
         )}
 
@@ -1074,6 +1208,28 @@ function App() {
             Refresh
           </button>
         )}
+
+        {/* Theme toggle */}
+        <button className="theme-toggle" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+          title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}>
+          {theme === 'dark' ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="5"/>
+              <line x1="12" y1="1" x2="12" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="23"/>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+              <line x1="1" y1="12" x2="3" y2="12"/>
+              <line x1="21" y1="12" x2="23" y2="12"/>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          )}
+        </button>
       </header>
 
       {/* ── Body ── */}
@@ -1081,6 +1237,12 @@ function App() {
 
         {/* ── Sidebar ── */}
         <aside className="sidebar">
+          <CollapsibleSection title="Calendar" defaultOpen>
+            <TzDropdown value={uiTimezone} onChange={setUiTimezone} />
+          </CollapsibleSection>
+
+          <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '6px 0 10px' }} />
+
           <CollapsibleSection
             title="Connection"
             defaultOpen={schedules.length === 0}
@@ -1096,7 +1258,7 @@ function App() {
           </CollapsibleSection>
 
           {(schedules.length > 0 || loading) && (
-            <hr style={{ border: 'none', borderTop: '1px solid #1E293B', margin: '10px 0' }} />
+            <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '10px 0' }} />
           )}
 
           {schedules.length > 0 && (
@@ -1143,7 +1305,7 @@ function App() {
 
           {/* Empty state */}
           {!loading && !error && schedules.length === 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 16, color: '#5A7A9A' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 16, color: 'var(--c-muted)' }}>
               {!cfg.token ? (
                 // ── No token at all ──────────────────────────────────────────
                 <>
@@ -1153,12 +1315,12 @@ function App() {
                     <div style={{ fontSize: 15, fontWeight: 700, color: '#FA4616', marginBottom: 8 }}>
                       Personal Access Token required
                     </div>
-                    <div style={{ fontSize: 13, lineHeight: 1.6, color: '#C8D8E8' }}>
+                    <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--c-text)' }}>
                       Paste your UiPath PAT into the <strong>Personal Access Token</strong> field
                       in the sidebar, then fill in the Orchestrator URL and click{' '}
                       <strong>Fetch Schedules</strong>.
                     </div>
-                    <div style={{ fontSize: 11, color: '#5A7A9A', marginTop: 10 }}>
+                    <div style={{ fontSize: 11, color: 'var(--c-muted)', marginTop: 10 }}>
                       Generate a PAT: UiPath Cloud → My Profile → Personal Access Tokens → + New
                     </div>
                   </div>
@@ -1166,14 +1328,14 @@ function App() {
               ) : (
                 // ── Token present, no data yet ───────────────────────────────
                 <>
-                  <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#1E293B" strokeWidth="1.5">
+                  <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--c-border)" strokeWidth="1.5">
                     <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
                     <line x1="16" y1="2" x2="16" y2="6"/>
                     <line x1="8"  y1="2" x2="8"  y2="6"/>
                     <line x1="3"  y1="10" x2="21" y2="10"/>
                   </svg>
                   <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6, color: '#C8D8E8' }}>
+                    <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6, color: 'var(--c-text)' }}>
                       No schedules loaded
                     </div>
                     <div style={{ fontSize: 13 }}>
@@ -1193,7 +1355,7 @@ function App() {
           {(schedules.length > 0 || showSkeleton) && (
             <div className="month-nav" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
               <button onClick={() => navigate(-1)}>‹</button>
-              <span style={{ fontWeight: 700, fontSize: 16, minWidth: 180, textAlign: 'center', color: '#C8D8E8' }}>
+              <span style={{ fontWeight: 700, fontSize: 16, minWidth: 180, textAlign: 'center', color: 'var(--c-text)' }}>
                 {showSkeleton
                   ? <span className="skeleton" style={{ display: 'inline-block', width: 160, height: 18 }} />
                   : navLabel}
@@ -1208,8 +1370,8 @@ function App() {
           {showSkeleton && calView !== 'month' && (
             <div style={{ display: 'flex', gap: 2 }}>
               {Array.from({ length: calView === 'week' ? 7 : calView === '3day' ? 3 : 1 }).map((_, i) => (
-                <div key={i} style={{ flex: 1, minHeight: 400, background: '#0B1929',
-                  border: '1px solid #1E293B', borderRadius: 4, padding: 8 }}>
+                <div key={i} style={{ flex: 1, minHeight: 400, background: 'var(--c-surface)',
+                  border: '1px solid var(--c-border)', borderRadius: 4, padding: 8 }}>
                   <div className="skeleton" style={{ width: '40%', height: 12, marginBottom: 8 }} />
                   <div className="skeleton" style={{ width: '70%', height: 16, marginBottom: 6 }} />
                   <div className="skeleton" style={{ width: '55%', height: 16 }} />

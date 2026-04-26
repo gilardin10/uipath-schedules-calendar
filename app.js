@@ -712,31 +712,65 @@ function TokenField({ value, onChange }) {
   );
 }
 
-// ─── Modal base ───────────────────────────────────────────────────────────────
-function Modal({ show, onClose, children }) {
-  useEffect(() => {
-    if (!show) return;
-    document.body.style.overflow = 'hidden';
-    function onKey(e) { if (e.key === 'Escape') onClose(); }
-    window.addEventListener('keydown', onKey);
-    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
-  }, [show, onClose]);
-  if (!show) return null;
+// ─── Hint icon (fixed-position tooltip, never clipped by overflow) ────────────
+function HintIcon({ text }) {
+  const ref = useRef(null);
+  const [tip, setTip] = useState(null);
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-card" onClick={e => e.stopPropagation()}>
-        {children}
-      </div>
+    <span className="hint-wrap" ref={ref}
+      onMouseEnter={() => {
+        const r = ref.current?.getBoundingClientRect();
+        if (r) setTip({ x: r.left + r.width / 2, y: r.top });
+      }}
+      onMouseLeave={() => setTip(null)}
+    >
+      <span className="hint-icon">?</span>
+      {tip && (
+        <div className="hint-tooltip" style={{ left: tip.x, top: tip.y }}>
+          {text}
+        </div>
+      )}
+    </span>
+  );
+}
+
+// ─── Popover (anchored dropdown, no full-screen overlay) ──────────────────────
+function Popover({ trigger, children, align = 'left' }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const toggle = useCallback(() => setOpen(v => !v), []);
+  const close  = useCallback(() => setOpen(false), []);
+
+  useEffect(() => {
+    if (!open) return;
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    function onDown(e) {
+      if (!wrapRef.current?.contains(e.target)) setOpen(false);
+    }
+    window.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', flexShrink: 0 }}>
+      {trigger({ open, toggle, close })}
+      {open && (
+        <div className={`popover${align === 'right' ? ' popover-right' : ''}`}>
+          {typeof children === 'function' ? children({ close }) : children}
+        </div>
+      )}
     </div>
   );
 }
 
-// ─── Connection modal ─────────────────────────────────────────────────────────
-function ConnectionModal({ show, onClose, cfg, onSave, loading }) {
+// ─── Connection popover ───────────────────────────────────────────────────────
+function ConnectionPopover({ cfg, onSave, loading, onClose }) {
   const [local, setLocal] = useState(cfg);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
-
-  useEffect(() => { if (show) setLocal(cfg); }, [show]);
 
   const previewUrl = local.url && local.tenant
     ? `${local.url.replace(/\/$/, '')}/${local.tenant}${local.apiPrefix || ''}/odata/ProcessSchedules`
@@ -749,31 +783,37 @@ function ConnectionModal({ show, onClose, cfg, onSave, loading }) {
   }
 
   return (
-    <Modal show={show} onClose={onClose}>
-      <div className="modal-header">
-        <span className="modal-title">Connection Settings</span>
-        <button className="modal-close-btn" onClick={onClose}>×</button>
-      </div>
-      <div className="modal-body">
+    <>
+      <div className="popover-header">Connection</div>
+      <div className="popover-body">
         <div className="modal-field">
-          <div className="field-label">Orchestrator URL</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Orchestrator URL
+            <HintIcon text="Base URL of your UiPath Cloud or on-prem instance, e.g. https://cloud.uipath.com/myorg" />
+          </div>
           <input type="text" value={local.url} onChange={e => set('url', e.target.value)}
             placeholder="https://cloud.uipath.com/org" />
         </div>
         <div className="modal-field">
-          <div className="field-label">Tenant</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Tenant
+            <HintIcon text="Orchestrator tenant name, visible in the URL after the org segment. Usually 'Default'." />
+          </div>
           <input type="text" value={local.tenant} onChange={e => set('tenant', e.target.value)}
             placeholder="Default" />
         </div>
         <div className="modal-field">
-          <div className="field-label">Folder ID</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Folder ID
+            <HintIcon text="Optional numeric ID of the Orchestrator folder (Org Unit). Leave blank to use the root folder." />
+          </div>
           <input type="text" value={local.folder} onChange={e => set('folder', e.target.value)}
             placeholder="1234" />
         </div>
         <div className="modal-field">
-          <div className="field-label">
-            Orchestrator Path
-            <span className="field-badge">Cloud vs on-prem</span>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            API Path Prefix
+            <HintIcon text="Cloud Orchestrator: /orchestrator_  ·  On-prem: leave blank." />
           </div>
           <input type="text" value={local.apiPrefix} onChange={e => set('apiPrefix', e.target.value)}
             placeholder="/orchestrator_" />
@@ -793,76 +833,86 @@ function ConnectionModal({ show, onClose, cfg, onSave, loading }) {
           <TokenField value={local.token} onChange={v => set('token', v)} />
         </div>
         <div className="field-hint">
-          URL, Tenant, and Folder saved to localStorage. Token stored in sessionStorage only (clears on tab close).
-          All API calls are proxied server-side — your PAT never reaches third parties.
+          URL &amp; Tenant saved to localStorage. Token in sessionStorage only — cleared on tab close.
+          All API calls go through the server-side proxy; your PAT never leaves this domain.
         </div>
       </div>
-      <div className="modal-footer">
+      <div className="popover-footer">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn-primary" onClick={handleSave}
           disabled={loading || !local.url || !local.token}
           style={{ flex: 1, justifyContent: 'center' }}>
-          {loading ? 'Loading…' : 'Save & Fetch Schedules'}
+          {loading ? 'Loading…' : 'Save & Fetch'}
         </button>
       </div>
-    </Modal>
+    </>
   );
 }
 
-// ─── Settings modal ───────────────────────────────────────────────────────────
-function SettingsModal({ show, onClose, projDays, onProjDays, defaultDurMin, onDurMin, theme, onTheme, uiTimezone, onTimezone }) {
+// ─── Settings popover ─────────────────────────────────────────────────────────
+function SettingsPopover({ projDays, onProjDays, defaultDurMin, onDurMin, theme, onTheme, uiTimezone, onTimezone, onClose }) {
   const tzList = useMemo(() => {
     try { return Intl.supportedValuesOf('timeZone'); } catch (_) { return []; }
   }, []);
   return (
-    <Modal show={show} onClose={onClose}>
-      <div className="modal-header">
-        <span className="modal-title">Settings</span>
-        <button className="modal-close-btn" onClick={onClose}>×</button>
-      </div>
-      <div className="modal-body">
+    <>
+      <div className="popover-header">Settings</div>
+      <div className="popover-body">
         <div className="modal-field">
-          <div className="field-label">Projection Period</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Projection Period
+            <HintIcon text="How many days ahead to compute scheduled run occurrences. Longer periods use more CPU." />
+          </div>
           <select value={projDays} onChange={e => onProjDays(Number(e.target.value))}>
             {[7, 14, 30, 60].map(d => <option key={d} value={d}>{d} days</option>)}
           </select>
         </div>
         <div className="modal-field">
-          <div className="field-label">Default Schedule Duration (min)</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Default Duration (min)
+            <HintIcon text="Fallback event height used when no successful job history exists for a schedule." />
+          </div>
           <input type="number" min="1" max="1440" value={defaultDurMin}
             onChange={e => onDurMin(Math.max(1, Number(e.target.value) || 5))}
             placeholder="5" />
-          <div className="field-hint">Used when no job history is available.</div>
         </div>
         <div className="modal-field">
-          <div className="field-label">Appearance</div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Appearance
+            <HintIcon text="Toggle between dark and light colour themes." />
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
             <button className="btn-ghost"
-              style={{ flex: 1, justifyContent: 'center', background: theme === 'dark' ? 'var(--c-border)' : '' }}
+              style={{ flex: 1, justifyContent: 'center',
+                background: theme === 'dark' ? 'var(--c-border)' : '' }}
               onClick={() => onTheme('dark')}>Dark</button>
             <button className="btn-ghost"
-              style={{ flex: 1, justifyContent: 'center', background: theme === 'light' ? 'var(--c-border)' : '' }}
+              style={{ flex: 1, justifyContent: 'center',
+                background: theme === 'light' ? 'var(--c-border)' : '' }}
               onClick={() => onTheme('light')}>Light</button>
           </div>
         </div>
         <div className="modal-field">
-          <div className="field-label">Display Timezone</div>
-          <input type="text" list="tz-datalist" value={uiTimezone} onChange={e => onTimezone(e.target.value)}
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Display Timezone
+            <HintIcon text="IANA timezone used as fallback when a schedule has no timezone set in Orchestrator (e.g. America/New_York)." />
+          </div>
+          <input type="text" list="tz-datalist" value={uiTimezone}
+            onChange={e => onTimezone(e.target.value)}
             placeholder="e.g. America/New_York" />
           {tzList.length > 0 && (
             <datalist id="tz-datalist">
               {tzList.map(tz => <option key={tz} value={tz} />)}
             </datalist>
           )}
-          <div className="field-hint">Fallback when a schedule has no configured timezone.</div>
         </div>
       </div>
-      <div className="modal-footer">
+      <div className="popover-footer">
         <button className="btn-primary" onClick={onClose} style={{ flex: 1, justifyContent: 'center' }}>
-          Save & Close
+          Done
         </button>
       </div>
-    </Modal>
+    </>
   );
 }
 
@@ -893,8 +943,6 @@ function App() {
     localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone
   );
   const [defaultDurMin,    setDefaultDurMin]    = useState(() => Number(localStorage.getItem(LS_KEYS.durMin)) || 5);
-  const [showConnModal,    setShowConnModal]    = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [schedules,        setSchedules]        = useState([]);
   const [colorMap,         setColorMap]         = useState({});
   const [selectedProcs,    setSelectedProcs]    = useState(new Set());
@@ -1145,24 +1193,44 @@ function App() {
           </span>
         </div>
 
-        {/* Connection Settings button */}
-        <button className="btn-ghost" onClick={() => setShowConnModal(true)}
-          style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          <span style={{
-            width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-            background: cfg.token ? '#00C48C' : '#FA4616',
-            boxShadow: cfg.token ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
-          }} />
-          Connection
-        </button>
+        {/* Connection popover */}
+        <Popover align="left" trigger={({ open, toggle }) => (
+          <button className="btn-ghost" onClick={toggle}
+            style={{ display: 'flex', alignItems: 'center', gap: 6,
+              background: open ? 'var(--c-border)' : '' }}>
+            <span style={{
+              width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+              background: cfg.token ? '#00C48C' : '#FA4616',
+              boxShadow: cfg.token ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
+            }} />
+            Connection
+          </button>
+        )}>
+          {({ close }) => (
+            <ConnectionPopover cfg={cfg} onSave={handleConnSave} loading={loading} onClose={close} />
+          )}
+        </Popover>
 
-        {/* Settings gear */}
-        <button className="theme-toggle" onClick={() => setShowSettingsModal(true)} title="Settings">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-          </svg>
-        </button>
+        {/* Settings popover */}
+        <Popover align="right" trigger={({ open, toggle }) => (
+          <button className="theme-toggle" onClick={toggle} title="Settings"
+            style={{ background: open ? 'var(--c-border)' : '' }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        )}>
+          {({ close }) => (
+            <SettingsPopover
+              projDays={projDays} onProjDays={setProjDays}
+              defaultDurMin={defaultDurMin} onDurMin={setDefaultDurMin}
+              theme={theme} onTheme={setTheme}
+              uiTimezone={uiTimezone} onTimezone={setUiTimezone}
+              onClose={close}
+            />
+          )}
+        </Popover>
 
         {/* View switcher */}
         <div className="view-switcher">
@@ -1359,26 +1427,6 @@ function App() {
       {/* Toast portal – fixed top-right */}
       <Toast error={error} onClose={() => setError(null)} />
 
-      {/* Modals */}
-      <ConnectionModal
-        show={showConnModal}
-        onClose={() => setShowConnModal(false)}
-        cfg={cfg}
-        onSave={handleConnSave}
-        loading={loading}
-      />
-      <SettingsModal
-        show={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-        projDays={projDays}
-        onProjDays={setProjDays}
-        defaultDurMin={defaultDurMin}
-        onDurMin={setDefaultDurMin}
-        theme={theme}
-        onTheme={setTheme}
-        uiTimezone={uiTimezone}
-        onTimezone={setUiTimezone}
-      />
     </div>
   );
 }

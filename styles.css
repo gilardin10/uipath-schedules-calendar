@@ -205,6 +205,16 @@ textarea {
   outline: none;
   transition: border-color .15s, box-shadow .15s;
 }
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 24 24' fill='none' stroke='%235A7A9A' stroke-width='2.5' xmlns='http://www.w3.org/2000/svg'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 14px;
+  padding-right: 28px;
+  cursor: pointer;
+}
 input[type=text]:focus,
 input[type=password]:focus,
 input[type=number]:focus,
@@ -629,96 +639,130 @@ input[type=checkbox] {
   line-height: 1.5;
 }
 
-/* ── Modal ──────────────────────────────────────────────────────────────────── */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(4, 14, 25, 0.78);
-  backdrop-filter: blur(4px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  padding: 20px;
-}
-.modal-card {
-  background: #0B1929;
-  border: 1px solid #1E293B;
-  border-radius: 12px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
-  width: 100%;
-  max-width: 460px;
+/* ── Popover (anchored dropdown) ─────────────────────────────────────────────── */
+.popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 320px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55);
+  z-index: 500;
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 40px);
-  overflow: hidden;
+  overflow: visible;
 }
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid #1E293B;
+/* Caret arrow */
+.popover::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: 16px;
+  width: 10px;
+  height: 10px;
+  background: var(--c-surface);
+  border-left: 1px solid var(--c-border);
+  border-top: 1px solid var(--c-border);
+  transform: rotate(45deg);
+}
+/* Right-aligned variant (caret on right side) */
+.popover-right {
+  left: auto;
+  right: 0;
+}
+.popover-right::before {
+  left: auto;
+  right: 16px;
+}
+.popover-header {
+  padding: 11px 16px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--c-muted);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  border-bottom: 1px solid var(--c-border);
   flex-shrink: 0;
 }
-.modal-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--c-text);
-  letter-spacing: .01em;
-}
-.modal-close-btn {
-  background: none;
-  border: none;
-  color: var(--c-muted);
-  cursor: pointer;
-  font-size: 22px;
-  line-height: 1;
-  padding: 0 2px;
-  transition: color .15s;
-}
-.modal-close-btn:hover { color: var(--c-text); }
-.modal-body {
-  padding: 20px;
-  overflow-y: auto;
+.popover-body {
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-height: min(460px, calc(100vh - 120px));
+  overflow-y: auto;
+  overflow-x: visible;
 }
-.modal-footer {
+.popover-footer {
+  padding: 10px 16px;
+  border-top: 1px solid var(--c-border);
   display: flex;
-  gap: 8px;
-  padding: 14px 20px;
-  border-top: 1px solid #1E293B;
+  gap: 6px;
   flex-shrink: 0;
 }
+
+/* ── Modal-field (reused inside popovers) ────────────────────────────────────── */
 .modal-field { display: flex; flex-direction: column; gap: 4px; }
-.field-badge {
-  margin-left: 6px;
-  font-size: 10px;
-  background: var(--c-bg);
-  border: 1px solid var(--c-border);
-  border-radius: 3px;
-  padding: 1px 5px;
-  color: var(--c-muted);
-  vertical-align: middle;
-}
 .field-hint {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--c-muted);
   line-height: 1.5;
 }
 
-/* Light-mode modal overrides */
-[data-theme="light"] .modal-overlay {
-  background: rgba(180, 200, 220, 0.6);
+/* ── Hint icon + tooltip ─────────────────────────────────────────────────────── */
+.hint-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+  margin-left: 5px;
+  flex-shrink: 0;
 }
-[data-theme="light"] .modal-card {
-  background: #f8fafc;
-  border-color: #e2e8f0;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.15);
+.hint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--c-border);
+  color: var(--c-muted);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  font-style: normal;
+  user-select: none;
+  transition: background .15s, color .15s;
 }
-[data-theme="light"] .modal-header,
-[data-theme="light"] .modal-footer {
-  border-color: #e2e8f0;
+.hint-wrap:hover .hint-icon {
+  background: var(--c-bh);
+  color: var(--c-text);
+}
+/* Tooltip rendered via fixed position in JS — just needs styling */
+.hint-tooltip {
+  position: fixed;
+  transform: translate(-50%, calc(-100% - 8px));
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 7px;
+  padding: 7px 11px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--c-text);
+  line-height: 1.55;
+  z-index: 9000;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  white-space: normal;
+  max-width: 220px;
+}
+
+/* Light-mode overrides */
+[data-theme="light"] .popover {
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.12);
+}
+[data-theme="light"] .hint-tooltip {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
 }

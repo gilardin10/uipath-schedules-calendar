@@ -628,3 +628,97 @@ input[type=checkbox] {
   word-break: break-all;
   line-height: 1.5;
 }
+
+/* ── Modal ──────────────────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 14, 25, 0.78);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.modal-card {
+  background: #0B1929;
+  border: 1px solid #1E293B;
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 40px);
+  overflow: hidden;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #1E293B;
+  flex-shrink: 0;
+}
+.modal-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--c-text);
+  letter-spacing: .01em;
+}
+.modal-close-btn {
+  background: none;
+  border: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+  padding: 0 2px;
+  transition: color .15s;
+}
+.modal-close-btn:hover { color: var(--c-text); }
+.modal-body {
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal-footer {
+  display: flex;
+  gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid #1E293B;
+  flex-shrink: 0;
+}
+.modal-field { display: flex; flex-direction: column; gap: 4px; }
+.field-badge {
+  margin-left: 6px;
+  font-size: 10px;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--c-muted);
+  vertical-align: middle;
+}
+.field-hint {
+  font-size: 10px;
+  color: var(--c-muted);
+  line-height: 1.5;
+}
+
+/* Light-mode modal overrides */
+[data-theme="light"] .modal-overlay {
+  background: rgba(180, 200, 220, 0.6);
+}
+[data-theme="light"] .modal-card {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.15);
+}
+[data-theme="light"] .modal-header,
+[data-theme="light"] .modal-footer {
+  border-color: #e2e8f0;
+}

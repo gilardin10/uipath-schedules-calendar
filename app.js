@@ -13,7 +13,7 @@ const PALETTE = [
 function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 
 // ─── localStorage / sessionStorage helpers ────────────────────────────────────
-const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', prefix: 'usp_prefix', theme: 'usp_theme', uiTz: 'usp_ui_tz' };
+const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', prefix: 'usp_prefix', theme: 'usp_theme', uiTz: 'usp_ui_tz', durMin: 'usp_dur_min' };
 const SS_KEY  = 'usp_token';
 
 
@@ -62,12 +62,12 @@ async function proxyFetch(cfg, action, extra = {}) {
 async function fetchSchedules(cfg)                       { return proxyFetch(cfg, 'schedules'); }
 async function fetchJobsForSchedule(cfg, releaseName)    { return proxyFetch(cfg, 'jobs', { releaseName }); }
 
-function medianDurationMs(jobs) {
+function medianDurationMs(jobs, fallbackMs = 5 * 60 * 1000) {
   const durations = jobs
     .filter(j => j.StartTime && j.EndTime && j.State === 'Successful')
     .map(j => new Date(j.EndTime) - new Date(j.StartTime))
     .filter(d => d > 0);
-  if (!durations.length) return 5 * 60 * 1000; // default 5 min
+  if (!durations.length) return fallbackMs;
   durations.sort((a, b) => a - b);
   const mid = Math.floor(durations.length / 2);
   return durations.length % 2
@@ -542,7 +542,7 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
                       onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
                       onMouseLeave={onLeave}>
                       <div className="tg-event-time">{fmtTime(ev.occurrence.start)}</div>
-                      {heightPx > 28 && <div className="tg-event-name">{ev.schedule.name}</div>}
+                      <div className="tg-event-name">{ev.schedule.name}</div>
                     </div>
                   );
                 })}
@@ -697,85 +697,157 @@ function TokenField({ value, onChange }) {
   );
 }
 
-// ─── Config panel ─────────────────────────────────────────────────────────────
-function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
+// ─── Modal base ───────────────────────────────────────────────────────────────
+function Modal({ show, onClose, children }) {
+  useEffect(() => {
+    if (!show) return;
+    document.body.style.overflow = 'hidden';
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
+  }, [show, onClose]);
+  if (!show) return null;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card" onClick={e => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─── Connection modal ─────────────────────────────────────────────────────────
+function ConnectionModal({ show, onClose, cfg, onSave, loading }) {
   const [local, setLocal] = useState(cfg);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
 
-  function handleFetch() {
-    saveConfig(local);
-    onChange(local);
-    onFetch(local);
-  }
+  useEffect(() => { if (show) setLocal(cfg); }, [show]);
 
   const previewUrl = local.url && local.tenant
     ? `${local.url.replace(/\/$/, '')}/${local.tenant}${local.apiPrefix || ''}/odata/ProcessSchedules`
     : null;
 
+  function handleSave() {
+    saveConfig(local);
+    onSave(local);
+    onClose();
+  }
+
   return (
-    <div>
-      <div className="section-label">Orchestrator Connection</div>
-
-      <div style={{ marginBottom: 8 }}>
-        <div className="field-label">Orchestrator URL</div>
-        <input type="text" value={local.url} onChange={e => set('url', e.target.value)}
-          placeholder="https://cloud.uipath.com/org" />
+    <Modal show={show} onClose={onClose}>
+      <div className="modal-header">
+        <span className="modal-title">Connection Settings</span>
+        <button className="modal-close-btn" onClick={onClose}>×</button>
       </div>
-
-      <div style={{ marginBottom: 8 }}>
-        <div className="field-label">Tenant</div>
-        <input type="text" value={local.tenant} onChange={e => set('tenant', e.target.value)}
-          placeholder="Default" />
-      </div>
-
-      <div style={{ marginBottom: 8 }}>
-        <div className="field-label">Folder ID</div>
-        <input type="text" value={local.folder} onChange={e => set('folder', e.target.value)}
-          placeholder="1234" />
-      </div>
-
-      <div style={{ marginBottom: 8 }}>
-        <div className="field-label">
-          Orchestrator Path
-          <span style={{ marginLeft: 6, fontSize: 10, background: 'var(--c-bg)',
-            border: '1px solid var(--c-border)', borderRadius: 3, padding: '1px 5px', color: 'var(--c-muted)' }}>
-            Cloud vs on-prem
-          </span>
+      <div className="modal-body">
+        <div className="modal-field">
+          <div className="field-label">Orchestrator URL</div>
+          <input type="text" value={local.url} onChange={e => set('url', e.target.value)}
+            placeholder="https://cloud.uipath.com/org" />
         </div>
-        <input type="text" value={local.apiPrefix}
-          onChange={e => set('apiPrefix', e.target.value)}
-          placeholder="/orchestrator_" />
-        <div style={{ fontSize: 10, color: 'var(--c-muted)', marginTop: 3, lineHeight: 1.5 }}>
-          <strong style={{ color: 'var(--c-blue)' }}>Cloud:</strong>{' '}/orchestrator_{' '}
-          &nbsp;·&nbsp;
-          <strong style={{ color: 'var(--c-blue)' }}>On-prem:</strong>{' '}leave blank
+        <div className="modal-field">
+          <div className="field-label">Tenant</div>
+          <input type="text" value={local.tenant} onChange={e => set('tenant', e.target.value)}
+            placeholder="Default" />
+        </div>
+        <div className="modal-field">
+          <div className="field-label">Folder ID</div>
+          <input type="text" value={local.folder} onChange={e => set('folder', e.target.value)}
+            placeholder="1234" />
+        </div>
+        <div className="modal-field">
+          <div className="field-label">
+            Orchestrator Path
+            <span className="field-badge">Cloud vs on-prem</span>
+          </div>
+          <input type="text" value={local.apiPrefix} onChange={e => set('apiPrefix', e.target.value)}
+            placeholder="/orchestrator_" />
+          <div className="field-hint">
+            <strong style={{ color: 'var(--c-blue)' }}>Cloud:</strong> /orchestrator_
+            &nbsp;·&nbsp;
+            <strong style={{ color: 'var(--c-blue)' }}>On-prem:</strong> leave blank
+          </div>
+        </div>
+        {previewUrl && (
+          <div className="url-preview">
+            <div className="url-preview-label">URL Preview</div>
+            <div className="url-preview-value">{previewUrl}</div>
+          </div>
+        )}
+        <div className="modal-field">
+          <TokenField value={local.token} onChange={v => set('token', v)} />
+        </div>
+        <div className="field-hint">
+          URL, Tenant, and Folder saved to localStorage. Token stored in sessionStorage only (clears on tab close).
+          All API calls are proxied server-side — your PAT never reaches third parties.
         </div>
       </div>
+      <div className="modal-footer">
+        <button className="btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="btn-primary" onClick={handleSave}
+          disabled={loading || !local.url || !local.token}
+          style={{ flex: 1, justifyContent: 'center' }}>
+          {loading ? 'Loading…' : 'Save & Fetch Schedules'}
+        </button>
+      </div>
+    </Modal>
+  );
+}
 
-      {/* URL preview */}
-      {previewUrl && (
-        <div className="url-preview" style={{ marginBottom: 10 }}>
-          <div className="url-preview-label">URL Preview</div>
-          <div className="url-preview-value">{previewUrl}</div>
+// ─── Settings modal ───────────────────────────────────────────────────────────
+function SettingsModal({ show, onClose, projDays, onProjDays, defaultDurMin, onDurMin, theme, onTheme, uiTimezone, onTimezone }) {
+  const tzList = useMemo(() => {
+    try { return Intl.supportedValuesOf('timeZone'); } catch (_) { return []; }
+  }, []);
+  return (
+    <Modal show={show} onClose={onClose}>
+      <div className="modal-header">
+        <span className="modal-title">Settings</span>
+        <button className="modal-close-btn" onClick={onClose}>×</button>
+      </div>
+      <div className="modal-body">
+        <div className="modal-field">
+          <div className="field-label">Projection Period</div>
+          <select value={projDays} onChange={e => onProjDays(Number(e.target.value))}>
+            {[7, 14, 30, 60].map(d => <option key={d} value={d}>{d} days</option>)}
+          </select>
         </div>
-      )}
-
-      <div style={{ marginBottom: 10 }}>
-        <TokenField value={local.token} onChange={v => set('token', v)} />
+        <div className="modal-field">
+          <div className="field-label">Default Schedule Duration (min)</div>
+          <input type="number" min="1" max="1440" value={defaultDurMin}
+            onChange={e => onDurMin(Math.max(1, Number(e.target.value) || 5))}
+            placeholder="5" />
+          <div className="field-hint">Used when no job history is available.</div>
+        </div>
+        <div className="modal-field">
+          <div className="field-label">Appearance</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn-ghost"
+              style={{ flex: 1, justifyContent: 'center', background: theme === 'dark' ? 'var(--c-border)' : '' }}
+              onClick={() => onTheme('dark')}>Dark</button>
+            <button className="btn-ghost"
+              style={{ flex: 1, justifyContent: 'center', background: theme === 'light' ? 'var(--c-border)' : '' }}
+              onClick={() => onTheme('light')}>Light</button>
+          </div>
+        </div>
+        <div className="modal-field">
+          <div className="field-label">Display Timezone</div>
+          <input type="text" list="tz-datalist" value={uiTimezone} onChange={e => onTimezone(e.target.value)}
+            placeholder="e.g. America/New_York" />
+          {tzList.length > 0 && (
+            <datalist id="tz-datalist">
+              {tzList.map(tz => <option key={tz} value={tz} />)}
+            </datalist>
+          )}
+          <div className="field-hint">Fallback when a schedule has no configured timezone.</div>
+        </div>
       </div>
-
-      <button className="btn-primary" onClick={handleFetch}
-        disabled={loading || !local.url || !local.token}
-        style={{ width: '100%', justifyContent: 'center' }}>
-        {loading ? 'Loading…' : scheduleCount != null ? `Reload (${scheduleCount})` : 'Fetch Schedules'}
-      </button>
-
-      <div style={{ marginTop: 10, fontSize: 11, color: 'var(--c-muted)', lineHeight: 1.6 }}>
-        URL, Tenant, and Folder saved to localStorage.<br/>
-        Token stored in sessionStorage only (clears on tab close).<br/>
-        All API calls are proxied server-side — your PAT never reaches third parties.
+      <div className="modal-footer">
+        <button className="btn-primary" onClick={onClose} style={{ flex: 1, justifyContent: 'center' }}>
+          Save & Close
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -798,39 +870,20 @@ function Legend({ schedules, colorMap, selectedProcs, onToggle }) {
   );
 }
 
-// ─── Timezone dropdown ────────────────────────────────────────────────────────
-function TzDropdown({ value, onChange }) {
-  const tzList = useMemo(() => {
-    try { return Intl.supportedValuesOf('timeZone'); } catch (_) { return []; }
-  }, []);
-  return (
-    <div style={{ marginBottom: 8 }}>
-      <div className="field-label">Display Timezone</div>
-      <input type="text" list="tz-datalist" value={value} onChange={e => onChange(e.target.value)}
-        placeholder="e.g. America/New_York" />
-      {tzList.length > 0 && (
-        <datalist id="tz-datalist">
-          {tzList.map(tz => <option key={tz} value={tz} />)}
-        </datalist>
-      )}
-      <div style={{ fontSize: 10, color: 'var(--c-muted)', marginTop: 3, lineHeight: 1.5 }}>
-        Fallback when a schedule has no configured timezone.
-      </div>
-    </div>
-  );
-}
-
 // ─── Main App ─────────────────────────────────────────────────────────────────
 function App() {
-  const [cfg,         setCfg]         = useState(loadConfig);
-  const [theme,       setTheme]       = useState(() => localStorage.getItem(LS_KEYS.theme) || 'dark');
-  const [uiTimezone,  setUiTimezone]  = useState(() =>
+  const [cfg,              setCfg]              = useState(loadConfig);
+  const [theme,            setTheme]            = useState(() => localStorage.getItem(LS_KEYS.theme) || 'dark');
+  const [uiTimezone,       setUiTimezone]       = useState(() =>
     localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone
   );
-  const [schedules,   setSchedules]   = useState([]);
-  const [colorMap,    setColorMap]    = useState({});
-  const [selectedProcs, setSelectedProcs] = useState(new Set());
-  const [projDays,    setProjDays]    = useState(30);
+  const [defaultDurMin,    setDefaultDurMin]    = useState(() => Number(localStorage.getItem(LS_KEYS.durMin)) || 5);
+  const [showConnModal,    setShowConnModal]    = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [schedules,        setSchedules]        = useState([]);
+  const [colorMap,         setColorMap]         = useState({});
+  const [selectedProcs,    setSelectedProcs]    = useState(new Set());
+  const [projDays,         setProjDays]         = useState(30);
   const [loading,     setLoading]     = useState(false);
   const [projecting,  setProjecting]  = useState(false);
   const [error,       setError]       = useState(null);
@@ -866,6 +919,10 @@ function App() {
   }, [uiTimezone]);
 
   useEffect(() => {
+    localStorage.setItem(LS_KEYS.durMin, String(defaultDurMin));
+  }, [defaultDurMin]);
+
+  useEffect(() => {
     setSelectedMachines(new Set(machines.map(m => m.id)));
   }, [machines]);
 
@@ -887,6 +944,7 @@ function App() {
       // Fetch job durations in parallel (batches of 10 to avoid flooding)
       const enriched = [];
       const BATCH = 10;
+      const fallbackMs = defaultDurMin * 60 * 1000;
       for (let i = 0; i < raw.length; i += BATCH) {
         const batch = raw.slice(i, i + BATCH);
         const results = await Promise.allSettled(
@@ -899,7 +957,7 @@ function App() {
               cron:    s.StartProcessCron,
               tz:      s.TimeZoneId,
               machine: s.MachineRobotAssignment || null,
-              medianMs: medianDurationMs(jobs), // falls back to 5 min when jobs is []
+              medianMs: medianDurationMs(jobs, fallbackMs),
             };
           })
         );
@@ -907,12 +965,15 @@ function App() {
       }
 
       setSchedules(enriched);
+      // Jump calendar to today after successful load
+      const t = new Date();
+      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
     } catch (err) {
       setError(err.message || String(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [defaultDurMin]);
 
   // ── Project CRON events whenever schedules, filters, or projDays change ─────
   useEffect(() => {
@@ -959,15 +1020,24 @@ function App() {
   const handleHover  = useCallback((event, pos) => setTooltip({ event, pos }), []);
   const handleLeave  = useCallback(() => setTooltip({ event: null, pos: { x: 0, y: 0 } }), []);
 
-  // ── View switching: normalise anchorDate for the target view ─────────────────
+  const handleConnSave = useCallback((newCfg) => {
+    setCfg(newCfg);
+    handleFetch(newCfg);
+  }, [handleFetch]);
+
+  // ── View switching: always re-centre on today ─────────────────────────────────
   function switchView(v) {
     setCalView(v);
-    setAnchorDate(a => {
-      const d = new Date(a.getFullYear(), a.getMonth(), a.getDate());
-      if (v === 'month') return new Date(d.getFullYear(), d.getMonth(), 1);
-      if (v === 'week')  { d.setDate(d.getDate() - d.getDay()); return d; }
-      return d; // '3day' | 'day' keep as-is
-    });
+    const t = new Date();
+    if (v === 'month') {
+      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
+    } else if (v === 'week') {
+      const d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+      d.setDate(d.getDate() - d.getDay());
+      setAnchorDate(d);
+    } else {
+      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), t.getDate()));
+    }
   }
 
   // ── Navigation (prev / next / today) ─────────────────────────────────────────
@@ -1059,34 +1129,24 @@ function App() {
           </span>
         </div>
 
-        {/* PAT status badge */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 5, fontSize: 11,
-          background: cfg.token ? 'rgba(0,196,140,.1)' : 'rgba(250,70,22,.1)',
-          border: `1px solid ${cfg.token ? 'rgba(0,196,140,.3)' : 'rgba(250,70,22,.4)'}`,
-          borderRadius: 20, padding: '4px 10px', whiteSpace: 'nowrap', flexShrink: 0,
-          transition: 'background .3s, border-color .3s',
-        }}>
+        {/* Connection Settings button */}
+        <button className="btn-ghost" onClick={() => setShowConnModal(true)}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           <span style={{
-            width: 7, height: 7, borderRadius: '50%',
+            width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
             background: cfg.token ? '#00C48C' : '#FA4616',
             boxShadow: cfg.token ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
           }} />
-          <span style={{ color: cfg.token ? '#00C48C' : '#FA4616', fontWeight: 600 }}>
-            {cfg.token ? `PAT …${cfg.token.slice(-4)}` : 'No token'}
-          </span>
-        </div>
+          Connection
+        </button>
 
-        {/* Projection days */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 12, color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>
-            Projection Period (Days)
-          </span>
-          <select value={projDays} onChange={e => setProjDays(Number(e.target.value))}
-            style={{ width: 'auto', padding: '5px 8px', fontSize: 12 }}>
-            {[30,60,90,120,365].map(d => <option key={d} value={d}>{d}</option>)}
-          </select>
-        </div>
+        {/* Settings gear */}
+        <button className="theme-toggle" onClick={() => setShowSettingsModal(true)} title="Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
 
         {/* View switcher */}
         <div className="view-switcher">
@@ -1123,97 +1183,56 @@ function App() {
             Refresh
           </button>
         )}
-
-        {/* Theme toggle */}
-        <button className="theme-toggle" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-          title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}>
-          {theme === 'dark' ? (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="5"/>
-              <line x1="12" y1="1" x2="12" y2="3"/>
-              <line x1="12" y1="21" x2="12" y2="23"/>
-              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
-              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-              <line x1="1" y1="12" x2="3" y2="12"/>
-              <line x1="21" y1="12" x2="23" y2="12"/>
-              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
-              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-            </svg>
-          ) : (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-            </svg>
-          )}
-        </button>
       </header>
 
       {/* ── Body ── */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
-        {/* ── Sidebar ── */}
-        <aside className="sidebar">
-          <CollapsibleSection title="Calendar" defaultOpen>
-            <TzDropdown value={uiTimezone} onChange={setUiTimezone} />
-          </CollapsibleSection>
-
-          <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '6px 0 10px' }} />
-
-          <CollapsibleSection
-            title="Connection"
-            defaultOpen={schedules.length === 0}
-            badge={schedules.length > 0 ? '✓' : null}
-          >
-            <ConfigPanel
-              cfg={cfg}
-              onChange={setCfg}
-              onFetch={handleFetch}
-              loading={loading}
-              scheduleCount={schedules.length || null}
-            />
-          </CollapsibleSection>
-
-          {(schedules.length > 0 || loading) && (
-            <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '10px 0' }} />
-          )}
-
-          {schedules.length > 0 && (
-            <>
-              <CollapsibleSection title="Processes" defaultOpen>
-                <FilterList
-                  label=""
-                  items={procItems}
-                  selected={selectedProcs}
-                  onToggle={toggleProc}
-                  colorMap={colorMap}
-                />
-              </CollapsibleSection>
-              {machines.length > 0 && (
-                <CollapsibleSection title="Machines" defaultOpen={false}>
+        {/* ── Sidebar — only visible when data is loaded or loading ── */}
+        {(schedules.length > 0 || loading) && (
+          <aside className="sidebar">
+            {schedules.length > 0 && (
+              <>
+                <CollapsibleSection title="Processes" defaultOpen>
                   <FilterList
                     label=""
-                    items={machines}
-                    selected={selectedMachines}
-                    onToggle={toggleMachine}
+                    items={procItems}
+                    selected={selectedProcs}
+                    onToggle={toggleProc}
+                    colorMap={colorMap}
                   />
                 </CollapsibleSection>
-              )}
-            </>
-          )}
+                {machines.length > 0 && (
+                  <>
+                    <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '6px 0 10px' }} />
+                    <CollapsibleSection title="Machines" defaultOpen={false}>
+                      <FilterList
+                        label=""
+                        items={machines}
+                        selected={selectedMachines}
+                        onToggle={toggleMachine}
+                      />
+                    </CollapsibleSection>
+                  </>
+                )}
+              </>
+            )}
 
-          {/* Skeleton sidebar items while loading */}
-          {loading && (
-            <>
-              <div className="section-label" style={{ marginTop: 4 }}>Processes</div>
-              {Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <div className="skeleton" style={{ width: 14, height: 14, borderRadius: 3 }} />
-                  <div className="skeleton" style={{ width: 10, height: 10, borderRadius: '50%' }} />
-                  <div className="skeleton" style={{ flex: 1, height: 12 }} />
-                </div>
-              ))}
-            </>
-          )}
-        </aside>
+            {/* Skeleton sidebar items while loading */}
+            {loading && (
+              <>
+                <div className="section-label" style={{ marginTop: 4 }}>Processes</div>
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <div className="skeleton" style={{ width: 14, height: 14, borderRadius: 3 }} />
+                    <div className="skeleton" style={{ width: 10, height: 10, borderRadius: '50%' }} />
+                    <div className="skeleton" style={{ flex: 1, height: 12 }} />
+                  </div>
+                ))}
+              </>
+            )}
+          </aside>
+        )}
 
         {/* ── Main content ── */}
         <main style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
@@ -1231,9 +1250,9 @@ function App() {
                       Personal Access Token required
                     </div>
                     <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--c-text)' }}>
-                      Paste your UiPath PAT into the <strong>Personal Access Token</strong> field
-                      in the sidebar, then fill in the Orchestrator URL and click{' '}
-                      <strong>Fetch Schedules</strong>.
+                      Click the <strong>Connection</strong> button in the header, enter your
+                      Orchestrator URL and PAT, then click{' '}
+                      <strong>Save &amp; Fetch Schedules</strong>.
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--c-muted)', marginTop: 10 }}>
                       Generate a PAT: UiPath Cloud → My Profile → Personal Access Tokens → + New
@@ -1254,8 +1273,8 @@ function App() {
                       No schedules loaded
                     </div>
                     <div style={{ fontSize: 13 }}>
-                      Enter your Orchestrator URL and Folder ID in the sidebar,
-                      then click <strong>Fetch Schedules</strong>.
+                      Click the <strong>Connection</strong> button in the header, then click{' '}
+                      <strong>Save &amp; Fetch Schedules</strong>.
                     </div>
                     <div style={{ marginTop: 8, fontSize: 12, color: '#00C48C' }}>
                       ✓ Token is set
@@ -1323,6 +1342,27 @@ function App() {
 
       {/* Toast portal – fixed top-right */}
       <Toast error={error} onClose={() => setError(null)} />
+
+      {/* Modals */}
+      <ConnectionModal
+        show={showConnModal}
+        onClose={() => setShowConnModal(false)}
+        cfg={cfg}
+        onSave={handleConnSave}
+        loading={loading}
+      />
+      <SettingsModal
+        show={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        projDays={projDays}
+        onProjDays={setProjDays}
+        defaultDurMin={defaultDurMin}
+        onDurMin={setDefaultDurMin}
+        theme={theme}
+        onTheme={setTheme}
+        uiTimezone={uiTimezone}
+        onTimezone={setUiTimezone}
+      />
     </div>
   );
 }

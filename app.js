@@ -1,0 +1,1417 @@
+// UiPath Schedule Visualizer – Apollo Dark Mode
+// React 18 + Babel standalone + cron-parser + Lucide
+
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ─── Palette for process color-coding (cycles) ───────────────────────────────
+const PALETTE = [
+  '#FA4616','#00AEEF','#7B61FF','#00C48C','#FFB800',
+  '#FF6B9D','#00E5CC','#FF9F43','#A29BFE','#55EFC4',
+  '#FD79A8','#74B9FF','#FDCB6E','#6C5CE7','#00B894',
+];
+
+function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
+
+// ─── localStorage / sessionStorage helpers ────────────────────────────────────
+const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', proxy: 'usp_proxy', prefix: 'usp_prefix', theme: 'usp_theme', uiTz: 'usp_ui_tz' };
+const SS_KEY  = 'usp_token';
+
+
+function loadConfig() {
+  // apiPrefix: '/orchestrator_' for UiPath Cloud; '' for on-prem.
+  // Default to '/orchestrator_' — the most common case.
+  const storedPrefix = localStorage.getItem(LS_KEYS.prefix);
+  return {
+    url:       localStorage.getItem(LS_KEYS.url)    || '',
+    tenant:    localStorage.getItem(LS_KEYS.tenant) || 'Default',
+    folder:    localStorage.getItem(LS_KEYS.folder) || '',
+    proxy:     localStorage.getItem(LS_KEYS.proxy)  || 'https://corsproxy.io/?url=',
+    apiPrefix: storedPrefix !== null ? storedPrefix : '/orchestrator_',
+    token:     sessionStorage.getItem(SS_KEY)        || '',
+  };
+}
+function saveConfig({ url, tenant, folder, proxy, apiPrefix, token }) {
+  localStorage.setItem(LS_KEYS.url,    url);
+  localStorage.setItem(LS_KEYS.tenant, tenant);
+  localStorage.setItem(LS_KEYS.folder, folder);
+  localStorage.setItem(LS_KEYS.proxy,  proxy);
+  localStorage.setItem(LS_KEYS.prefix, apiPrefix);
+  sessionStorage.setItem(SS_KEY, token);
+}
+
+// ─── UiPath API helpers ────────────────────────────────────────────────────────
+// Build OData query strings manually: URLSearchParams percent-encodes '$' to
+// '%24', which causes Orchestrator to return 400 Bad Request.
+function buildODataQS(params) {
+  return Object.entries(params)
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join('&');
+}
+
+async function apiFetch(cfg, path, params = {}) {
+  const base      = cfg.url.replace(/\/$/, '');
+  const prefix    = (cfg.apiPrefix || '').replace(/\/$/, '');
+  const qs        = Object.keys(params).length ? buildODataQS(params) : '';
+  const apiUrl    = `${base}/${cfg.tenant}${prefix}${path}${qs ? '?' + qs : ''}`;
+  const proxy     = (cfg.proxy || '').trim();
+  const fullUrl   = proxy
+    ? (proxy.endsWith('=') ? `${proxy}${encodeURIComponent(apiUrl)}` : `${proxy}${apiUrl}`)
+    : apiUrl;
+
+  const headers = {
+    'Authorization': `Bearer ${cfg.token}`,
+    'Content-Type':  'application/json',
+  };
+  if (cfg.folder) headers['X-UIPATH-OrganizationUnitId'] = cfg.folder;
+
+  const res = await fetch(fullUrl, { headers });
+  if (res.status === 401) throw new Error(
+    '401: Token expired or invalid. Re-enter your Bearer Token.'
+  );
+  if (res.status === 403) throw new Error(
+    `403: Forbidden — access denied.\nURL: ${apiUrl}\n\n` +
+    `Common causes:\n` +
+    `• PAT is missing required scopes — add OR.Execution, OR.Monitoring, or OR.Jobs (read) scopes when generating the token\n` +
+    `• Folder ID is wrong or the token has no access to that folder — try leaving Folder ID blank to use the default folder\n` +
+    `• The Orchestrator user account lacks the "View" permission on Schedules`
+  );
+  if (res.status === 400) throw new Error(
+    `400: Bad Request.\nURL: ${apiUrl}\n\n` +
+    `Common causes:\n` +
+    `• Orchestrator Path is wrong — Cloud uses /orchestrator_, on-prem is usually empty\n` +
+    `• Tenant name is incorrect\n` +
+    `• Folder ID does not exist in this tenant`
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status} – ${res.statusText}\nURL: ${apiUrl}`);
+  return res.json();
+}
+
+async function fetchSchedules(cfg) {
+  const data = await apiFetch(cfg, '/odata/ProcessSchedules', {
+    '$select': 'Id,Name,StartProcessCron,TimeZoneId,Enabled,ReleaseId,ReleaseName',
+    '$filter': 'Enabled eq true',
+    '$top': 500,
+  });
+  return (data.value || []);
+}
+
+async function fetchJobsForSchedule(cfg, releaseName) {
+  // Escape single quotes for OData string literals; do NOT encodeURIComponent
+  // here — buildODataQS handles encoding of the entire value.
+  const safeRelease = releaseName.replace(/'/g, "''");
+  const data = await apiFetch(cfg, '/odata/Jobs', {
+    '$filter':  `ReleaseName eq '${safeRelease}'`,
+    '$select':  'Id,StartTime,EndTime,State',
+    '$orderby': 'StartTime desc',
+    '$top':     10,
+  });
+  return (data.value || []);
+}
+
+function medianDurationMs(jobs) {
+  const durations = jobs
+    .filter(j => j.StartTime && j.EndTime && j.State === 'Successful')
+    .map(j => new Date(j.EndTime) - new Date(j.StartTime))
+    .filter(d => d > 0);
+  if (!durations.length) return 5 * 60 * 1000; // default 5 min
+  durations.sort((a, b) => a - b);
+  const mid = Math.floor(durations.length / 2);
+  return durations.length % 2
+    ? durations[mid]
+    : (durations[mid - 1] + durations[mid]) / 2;
+}
+
+// ─── Windows TZ name → IANA mapping ──────────────────────────────────────────
+const WIN_TO_IANA = {
+  'Dateline Standard Time':'Etc/GMT+12','UTC-11':'Etc/GMT+11',
+  'Aleutian Standard Time':'America/Adak','Hawaiian Standard Time':'Pacific/Honolulu',
+  'Marquesas Standard Time':'Pacific/Marquesas','Alaskan Standard Time':'America/Anchorage',
+  'UTC-09':'Etc/GMT+9','Pacific Standard Time (Mexico)':'America/Santa_Isabel',
+  'UTC-08':'Etc/GMT+8','Pacific Standard Time':'America/Los_Angeles',
+  'US Mountain Standard Time':'America/Phoenix','Mountain Standard Time (Mexico)':'America/Chihuahua',
+  'Mountain Standard Time':'America/Denver','Central America Standard Time':'America/Guatemala',
+  'Central Standard Time':'America/Chicago','Easter Island Standard Time':'Pacific/Easter',
+  'Central Standard Time (Mexico)':'America/Mexico_City','Canada Central Standard Time':'America/Regina',
+  'SA Pacific Standard Time':'America/Bogota','Eastern Standard Time (Mexico)':'America/Cancun',
+  'Eastern Standard Time':'America/New_York','Haiti Standard Time':'America/Port-au-Prince',
+  'Cuba Standard Time':'America/Havana','US Eastern Standard Time':'America/Indianapolis',
+  'Turks And Caicos Standard Time':'America/Grand_Turk','Paraguay Standard Time':'America/Asuncion',
+  'Atlantic Standard Time':'America/Halifax','Venezuela Standard Time':'America/Caracas',
+  'Central Brazilian Standard Time':'America/Cuiaba','SA Western Standard Time':'America/La_Paz',
+  'Pacific SA Standard Time':'America/Santiago','Newfoundland Standard Time':'America/St_Johns',
+  'Tocantins Standard Time':'America/Araguaina','E. South America Standard Time':'America/Sao_Paulo',
+  'SA Eastern Standard Time':'America/Cayenne','Argentina Standard Time':'America/Buenos_Aires',
+  'Greenland Standard Time':'America/Godthab','Montevideo Standard Time':'America/Montevideo',
+  'Magallanes Standard Time':'America/Punta_Arenas','Saint Pierre Standard Time':'America/Miquelon',
+  'Bahia Standard Time':'America/Bahia','UTC-02':'Etc/GMT+2','Azores Standard Time':'Atlantic/Azores',
+  'Cape Verde Standard Time':'Atlantic/Cape_Verde','UTC':'UTC',
+  'GMT Standard Time':'Europe/London','Greenwich Standard Time':'Atlantic/Reykjavik',
+  'Sao Tome Standard Time':'Africa/Sao_Tome','Morocco Standard Time':'Africa/Casablanca',
+  'W. Europe Standard Time':'Europe/Berlin','Central Europe Standard Time':'Europe/Budapest',
+  'Romance Standard Time':'Europe/Paris','Central European Standard Time':'Europe/Warsaw',
+  'W. Central Africa Standard Time':'Africa/Lagos','Jordan Standard Time':'Asia/Amman',
+  'GTB Standard Time':'Europe/Bucharest','Middle East Standard Time':'Asia/Beirut',
+  'Egypt Standard Time':'Africa/Cairo','E. Europe Standard Time':'Asia/Nicosia',
+  'Syria Standard Time':'Asia/Damascus','West Bank Standard Time':'Asia/Hebron',
+  'South Africa Standard Time':'Africa/Johannesburg','FLE Standard Time':'Europe/Kiev',
+  'Israel Standard Time':'Asia/Jerusalem','Kaliningrad Standard Time':'Europe/Kaliningrad',
+  'Sudan Standard Time':'Africa/Khartoum','Libya Standard Time':'Africa/Tripoli',
+  'Namibia Standard Time':'Africa/Windhoek','Arabic Standard Time':'Asia/Baghdad',
+  'Turkey Standard Time':'Europe/Istanbul','Arab Standard Time':'Asia/Riyadh',
+  'Belarus Standard Time':'Europe/Minsk','Russian Standard Time':'Europe/Moscow',
+  'E. Africa Standard Time':'Africa/Nairobi','Iran Standard Time':'Asia/Tehran',
+  'Arabian Standard Time':'Asia/Dubai','Astrakhan Standard Time':'Europe/Astrakhan',
+  'Azerbaijan Standard Time':'Asia/Baku','Russia Time Zone 3':'Europe/Samara',
+  'Mauritius Standard Time':'Indian/Mauritius','Saratov Standard Time':'Europe/Saratov',
+  'Georgian Standard Time':'Asia/Tbilisi','Volgograd Standard Time':'Europe/Volgograd',
+  'Caucasus Standard Time':'Asia/Yerevan','Afghanistan Standard Time':'Asia/Kabul',
+  'West Asia Standard Time':'Asia/Tashkent','Ekaterinburg Standard Time':'Asia/Yekaterinburg',
+  'Pakistan Standard Time':'Asia/Karachi','Qyzylorda Standard Time':'Asia/Qyzylorda',
+  'India Standard Time':'Asia/Calcutta','Sri Lanka Standard Time':'Asia/Colombo',
+  'Nepal Standard Time':'Asia/Katmandu','Central Asia Standard Time':'Asia/Almaty',
+  'Bangladesh Standard Time':'Asia/Dhaka','Omsk Standard Time':'Asia/Omsk',
+  'Myanmar Standard Time':'Asia/Rangoon','SE Asia Standard Time':'Asia/Bangkok',
+  'Altai Standard Time':'Asia/Barnaul','W. Mongolia Standard Time':'Asia/Hovd',
+  'N. Central Asia Standard Time':'Asia/Novosibirsk','Tomsk Standard Time':'Asia/Tomsk',
+  'China Standard Time':'Asia/Shanghai','North Asia Standard Time':'Asia/Krasnoyarsk',
+  'Singapore Standard Time':'Asia/Singapore','W. Australia Standard Time':'Australia/Perth',
+  'Taipei Standard Time':'Asia/Taipei','Ulaanbaatar Standard Time':'Asia/Ulaanbaatar',
+  'North Asia East Standard Time':'Asia/Irkutsk','Japan Standard Time':'Asia/Tokyo',
+  'Korea Standard Time':'Asia/Seoul','Transbaikal Standard Time':'Asia/Chita',
+  'Tokyo Standard Time':'Asia/Tokyo','Yakutsk Standard Time':'Asia/Yakutsk',
+  'Cen. Australia Standard Time':'Australia/Adelaide','AUS Central Standard Time':'Australia/Darwin',
+  'E. Australia Standard Time':'Australia/Brisbane','AUS Eastern Standard Time':'Australia/Sydney',
+  'West Pacific Standard Time':'Pacific/Port_Moresby','Tasmania Standard Time':'Australia/Hobart',
+  'Vladivostok Standard Time':'Asia/Vladivostok','Lord Howe Standard Time':'Australia/Lord_Howe',
+  'Bougainville Standard Time':'Pacific/Bougainville','Russia Time Zone 10':'Asia/Srednekolymsk',
+  'Magadan Standard Time':'Asia/Magadan','Norfolk Standard Time':'Pacific/Norfolk',
+  'Sakhalin Standard Time':'Asia/Sakhalin','Central Pacific Standard Time':'Pacific/Guadalcanal',
+  'Russia Time Zone 11':'Asia/Kamchatka','New Zealand Standard Time':'Pacific/Auckland',
+  'UTC+12':'Etc/GMT-12','Fiji Standard Time':'Pacific/Fiji',
+  'Chatham Islands Standard Time':'Pacific/Chatham','UTC+13':'Etc/GMT-13',
+  'Tonga Standard Time':'Pacific/Tongatapu','Samoa Standard Time':'Pacific/Apia',
+  'Line Islands Standard Time':'Pacific/Kiritimati',
+};
+
+function toIanaTimezone(tz) {
+  if (!tz) return null;
+  if (WIN_TO_IANA[tz]) return WIN_TO_IANA[tz];
+  try { new Intl.DateTimeFormat('en', { timeZone: tz }); return tz; }
+  catch (_) { console.warn('[USV] Unknown timezone:', tz); return null; }
+}
+
+function normalizeQuartzCron(expr) {
+  if (!expr) return null;
+  let parts = expr.trim().split(/\s+/);
+  if (parts.length === 7) parts = parts.slice(0, 6); // strip year field
+  if (parts.length < 5 || parts.length > 6) {
+    console.warn('[USV] Unexpected cron field count', parts.length, ':', expr);
+    return null;
+  }
+  parts = parts.map(p => p === '?' ? '*' : p);
+  const joined = parts.join(' ');
+  if (/[LW#]/.test(joined)) {
+    console.warn('[USV] Unsupported Quartz modifier (L/W/#), skipping:', expr);
+    return null;
+  }
+  return joined;
+}
+
+// ─── CRON projection (uses Croner UMD global `Cron`) ─────────────────────────
+function projectSchedule(cronExpr, tzId, days, medianMs, uiTimezone) {
+  const results = [];
+  const norm = normalizeQuartzCron(cronExpr);
+  if (!norm) return results;
+  try {
+    if (typeof Cron === 'undefined') return results;
+    const now = new Date();
+    const end = new Date(now.getTime() + days * 86400000);
+    const opts = { startAt: now, stopAt: end };
+    const ianaZone = toIanaTimezone(tzId) || toIanaTimezone(uiTimezone);
+    if (ianaZone) opts.timezone = ianaZone;
+    const job = Cron(norm, opts);
+    const dates = job.nextRuns(2000, now);
+    for (const start of dates) {
+      if (start > end) break;
+      results.push({ start, end: new Date(start.getTime() + medianMs) });
+    }
+  } catch (e) {
+    console.warn('[USV] projectSchedule error:', e.message, '| cron:', cronExpr, '→', norm);
+  }
+  return results;
+}
+
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+function fmtTime(d) {
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+function fmtDate(d) {
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+function fmtDuration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60)   return `${s}s`;
+  if (s < 3600) return `${Math.round(s/60)}m`;
+  return `${(s/3600).toFixed(1)}h`;
+}
+function sameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() &&
+         a.getMonth()    === b.getMonth()    &&
+         a.getDate()     === b.getDate();
+}
+function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+function endOfMonth(d)   { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
+function addDays(d, n)   { return new Date(d.getTime() + n * 86400000); }
+
+// ─── Collapsible sidebar section ─────────────────────────────────────────────
+function CollapsibleSection({ title, children, defaultOpen = true, badge }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom: 2 }}>
+      <button className="collapsible-btn" onClick={() => setOpen(o => !o)}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span className="section-label" style={{ margin: 0 }}>{title}</span>
+          {badge && (
+            <span style={{ fontSize: 10, background: '#00C48C', color: '#040E19',
+              borderRadius: 8, padding: '1px 6px', fontWeight: 700 }}>
+              {badge}
+            </span>
+          )}
+        </div>
+        <svg className={`collapsible-chevron${open ? ' open' : ''}`}
+          width="12" height="12" viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" strokeWidth="2.5">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+      {open && <div style={{ paddingTop: 6, paddingBottom: 4 }}>{children}</div>}
+    </div>
+  );
+}
+
+// ─── Event-column layout (greedy, avoids overlaps) ────────────────────────────
+function computeEventCols(events) {
+  if (!events.length) return [];
+  const sorted = [...events].sort((a, b) => a.occurrence.start - b.occurrence.start);
+  const colEnds = []; // track the end-time of the last event in each column
+  const assignments = sorted.map(ev => {
+    let col = colEnds.findIndex(end => ev.occurrence.start >= end);
+    if (col === -1) col = colEnds.length;
+    colEnds[col] = ev.occurrence.end;
+    return col;
+  });
+  const totalCols = colEnds.length || 1;
+  return sorted.map((ev, i) => ({ ev, col: assignments[i], totalCols }));
+}
+
+// ─── Skeleton components ──────────────────────────────────────────────────────
+function SkeletonLine({ w = '100%', h = 14 }) {
+  return <div className="skeleton" style={{ width: w, height: h, marginBottom: 6 }} />;
+}
+function SkeletonCard() {
+  return (
+    <div style={{ background: 'var(--c-surface)', border: '1px solid var(--c-border)', borderRadius: 6, padding: 8 }}>
+      <SkeletonLine w="60%" h={12} />
+      <SkeletonLine w="90%" h={10} />
+      <SkeletonLine w="75%" h={10} />
+    </div>
+  );
+}
+function CalendarSkeleton() {
+  return (
+    <div className="cal-grid" style={{ gap: 2 }}>
+      {Array.from({ length: 35 }).map((_, i) => (
+        <div key={i} style={{ minHeight: 90, background: 'var(--c-surface)', border: '1px solid var(--c-border)', borderRadius: 6, padding: 4 }}>
+          <SkeletonLine w="30%" h={10} />
+          {i % 3 === 0 && <SkeletonLine w="85%" h={16} />}
+          {i % 5 === 0 && <SkeletonLine w="70%" h={16} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Tooltip ─────────────────────────────────────────────────────────────────
+function Tooltip({ event, pos }) {
+  if (!event) return null;
+  const { schedule, occurrence } = event;
+  const dur = occurrence.end - occurrence.start;
+  return (
+    <div className="tooltip" style={{ left: pos.x + 12, top: pos.y + 12 }}>
+      <div className="tooltip-title">{schedule.name}</div>
+      <div className="tooltip-row">
+        <span className="tooltip-label">Start</span>
+        <span className="tooltip-value">{fmtDate(occurrence.start)} {fmtTime(occurrence.start)}</span>
+      </div>
+      <div className="tooltip-row">
+        <span className="tooltip-label">Est. End</span>
+        <span className="tooltip-value">{fmtTime(occurrence.end)}</span>
+      </div>
+      <div className="tooltip-row">
+        <span className="tooltip-label">Duration</span>
+        <span className="tooltip-value">{fmtDuration(dur)}</span>
+      </div>
+      {schedule.machine && (
+        <div className="tooltip-row">
+          <span className="tooltip-label">Machine</span>
+          <span className="tooltip-value">{schedule.machine}</span>
+        </div>
+      )}
+      <div className="tooltip-row">
+        <span className="tooltip-label">CRON</span>
+        <span className="tooltip-value" style={{ fontFamily: 'monospace', fontSize: 11 }}>{schedule.cron}</span>
+      </div>
+      {schedule.tz && (
+        <div className="tooltip-row">
+          <span className="tooltip-label">Timezone</span>
+          <span className="tooltip-value">{schedule.tz}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Toast notification ───────────────────────────────────────────────────────
+function Toast({ error, onClose }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!error) return null;
+
+  const isCors = error === '__cors__';
+  const title   = isCors ? 'CORS / Network Error' : 'Request Failed';
+  const message = isCors
+    ? 'The browser blocked the request. Requests are routed via corsproxy.io by default — check your Orchestrator URL and token.'
+    : error;
+
+  // Warning icon SVG
+  const Icon = () => (
+    <svg className="toast-icon" width="15" height="15" viewBox="0 0 24 24"
+      fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+      <line x1="12" y1="9" x2="12" y2="13"/>
+      <line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+  );
+
+  return (
+    <div className="toast-container">
+      <div className="toast toast-error">
+        <Icon />
+        <div className="toast-body">
+          <div className="toast-title">{title}</div>
+          <div className="toast-message">{message}</div>
+          {isCors && (
+            <>
+              <button onClick={() => setExpanded(e => !e)}
+                style={{ background: 'none', border: 'none', color: 'var(--c-blue)',
+                  fontSize: 10, cursor: 'pointer', padding: '3px 0 0', fontFamily: 'Inter, sans-serif' }}>
+                {expanded ? '▲ Hide fixes' : '▼ Show fixes'}
+              </button>
+              {expanded && (
+                <div className="toast-detail">
+                  <ol>
+                    <li><strong>corsproxy.io</strong> is active by default. If it's down, try again in a moment.</li>
+                    <li><strong>Browser extension</strong> — install <em>Allow CORS</em> and disable the proxy (clear usp_proxy in localStorage).</li>
+                    <li><strong>Browser extension</strong> — install <em>Allow CORS</em> for Chrome/Firefox.</li>
+                    <li><strong>On-prem</strong> — add your origin to Orchestrator's web.config CORS list.</li>
+                  </ol>
+                  <div style={{ marginTop: 6, color: 'var(--c-muted)' }}>
+                    Token is sent over HTTPS only.
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+        <button className="toast-close" onClick={onClose} title="Dismiss">×</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Event chip ───────────────────────────────────────────────────────────────
+function EventChip({ event, color, onHover, onLeave }) {
+  return (
+    <button
+      className="event-chip"
+      style={{ background: color + '33', color, borderLeft: `3px solid ${color}` }}
+      onMouseEnter={e => onHover(event, { x: e.clientX, y: e.clientY })}
+      onMouseMove={e => onHover(event,  { x: e.clientX, y: e.clientY })}
+      onMouseLeave={onLeave}
+    >
+      {fmtTime(event.occurrence.start)} {event.schedule.name}
+    </button>
+  );
+}
+
+// ─── Calendar day cell ────────────────────────────────────────────────────────
+const MAX_VISIBLE = 3;
+function CalDay({ date, events, colorMap, isToday, isOtherMonth, onHover, onLeave }) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? events : events.slice(0, MAX_VISIBLE);
+  const overflow = events.length - MAX_VISIBLE;
+
+  return (
+    <div className={`cal-day${isToday ? ' today' : ''}${isOtherMonth ? ' other-month' : ''}`}>
+      <div className="cal-day-num">{date.getDate()}</div>
+      {visible.map((ev, i) => (
+        <EventChip
+          key={i}
+          event={ev}
+          color={colorMap[ev.schedule.id] || 'var(--c-muted)'}
+          onHover={onHover}
+          onLeave={onLeave}
+        />
+      ))}
+      {!expanded && overflow > 0 && (
+        <button className="more-events" onClick={() => setExpanded(true)}>
+          +{overflow} more
+        </button>
+      )}
+      {expanded && overflow > 0 && (
+        <button className="more-events" onClick={() => setExpanded(false)}>
+          show less
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─── Calendar month view ──────────────────────────────────────────────────────
+const WEEK_DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave }) {
+  const today  = new Date();
+  const first  = startOfMonth(month);
+  const last   = endOfMonth(month);
+
+  // Build grid: pad from Sunday
+  const startPad = first.getDay();
+  const cells = [];
+  for (let i = 0; i < startPad; i++)
+    cells.push(addDays(first, -(startPad - i)));
+  for (let d = new Date(first); d <= last; d = addDays(d, 1))
+    cells.push(new Date(d));
+  while (cells.length % 7 !== 0)
+    cells.push(addDays(cells[cells.length - 1], 1));
+
+  return (
+    <div>
+      {/* Weekday headers */}
+      <div className="cal-grid" style={{ gap: 2, marginBottom: 4 }}>
+        {WEEK_DAYS.map(d => (
+          <div key={d} style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: 'var(--c-muted)', padding: '4px 0' }}>
+            {d}
+          </div>
+        ))}
+      </div>
+      <div className="cal-grid" style={{ gap: 2 }}>
+        {cells.map((date, i) => {
+          const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+          const events = eventsByDay[key] || [];
+          return (
+            <CalDay
+              key={i}
+              date={date}
+              events={events}
+              colorMap={colorMap}
+              isToday={sameDay(date, today)}
+              isOtherMonth={date.getMonth() !== month.getMonth()}
+              onHover={onHover}
+              onLeave={onLeave}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Time-grid view (week / 3-day / day) ─────────────────────────────────────
+const HOUR_H = 52; // px per hour row
+
+function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
+  const scrollRef = useRef(null);
+  const today = new Date();
+
+  // Scroll to show 07:00 on first render
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 7 * HOUR_H;
+  }, []);
+
+  return (
+    <div className="tg-wrap">
+      {/* ── Day headers ── */}
+      <div className="tg-header">
+        <div className="tg-gutter" />
+        {days.map((date, i) => {
+          const isToday = sameDay(date, today);
+          return (
+            <div key={i} className="tg-day-hdr">
+              <div className="tg-day-weekday">
+                {date.toLocaleDateString('default', { weekday: 'short' })}
+              </div>
+              <div className={`tg-day-num${isToday ? ' today' : ''}`}>
+                {date.getDate()}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Scrollable body ── */}
+      <div className="tg-scroll" ref={scrollRef}>
+        <div className="tg-body" style={{ height: 24 * HOUR_H }}>
+
+          {/* Time gutter */}
+          <div className="tg-time-col" style={{ height: 24 * HOUR_H }}>
+            {Array.from({ length: 24 }, (_, h) => (
+              h === 0 ? null : (
+                <div key={h} className="tg-time-label" style={{ top: h * HOUR_H }}>
+                  {String(h).padStart(2, '0')}:00
+                </div>
+              )
+            ))}
+          </div>
+
+          {/* Day columns */}
+          {days.map((date, di) => {
+            const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+            const events = eventsByDay[key] || [];
+            const laid   = computeEventCols(events);
+            const isToday = sameDay(date, today);
+            const nowMin  = isToday ? today.getHours() * 60 + today.getMinutes() : null;
+
+            return (
+              <div key={di} className="tg-col"
+                style={{ background: isToday ? 'var(--c-today-tint)' : 'transparent' }}>
+
+                {/* Hour lines */}
+                {Array.from({ length: 24 }, (_, h) => (
+                  <div key={h} className="tg-hour-line" style={{ top: h * HOUR_H }} />
+                ))}
+                {/* Half-hour lines */}
+                {Array.from({ length: 24 }, (_, h) => (
+                  <div key={`h${h}`} className="tg-half-line" style={{ top: h * HOUR_H + HOUR_H / 2 }} />
+                ))}
+
+                {/* Current-time indicator */}
+                {nowMin !== null && (
+                  <div className="tg-now-line" style={{ top: (nowMin / 60) * HOUR_H }}>
+                    <div className="tg-now-dot" />
+                  </div>
+                )}
+
+                {/* Events */}
+                {laid.map(({ ev, col, totalCols }, i) => {
+                  const startMin = ev.occurrence.start.getHours() * 60 + ev.occurrence.start.getMinutes();
+                  const durMin   = Math.max((ev.occurrence.end - ev.occurrence.start) / 60000, 15);
+                  const topPx    = (startMin / 60) * HOUR_H;
+                  const heightPx = Math.max((durMin / 60) * HOUR_H - 2, 18);
+                  const color    = colorMap[ev.schedule.id] || 'var(--c-muted)';
+                  const pct      = 100 / totalCols;
+                  return (
+                    <div key={i} className="tg-event"
+                      style={{
+                        top: topPx + 1, height: heightPx,
+                        left: `calc(${col * pct}% + 2px)`,
+                        width: `calc(${pct}% - 4px)`,
+                        background: color + '28',
+                        borderLeft: `3px solid ${color}`,
+                        color,
+                      }}
+                      onMouseEnter={e => onHover(ev, { x: e.clientX, y: e.clientY })}
+                      onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
+                      onMouseLeave={onLeave}>
+                      <div className="tg-event-time">{fmtTime(ev.occurrence.start)}</div>
+                      {heightPx > 28 && <div className="tg-event-name">{ev.schedule.name}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Sidebar multi-select filter ──────────────────────────────────────────────
+function FilterList({ label, items, selected, onToggle, colorMap }) {
+  const [search, setSearch] = useState('');
+  const filtered = items.filter(it =>
+    it.label.toLowerCase().includes(search.toLowerCase())
+  );
+  const allSelected = items.every(it => selected.has(it.id));
+
+  return (
+    <div style={{ marginBottom: 8 }}>
+      {label && <div className="section-label">{label}</div>}
+      <input
+        type="text"
+        placeholder="Search…"
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+        style={{ marginBottom: 6 }}
+      />
+      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+        <button className="btn-ghost" style={{ fontSize: 11, padding: '3px 8px' }}
+          onClick={() => items.forEach(it => !selected.has(it.id) && onToggle(it.id))}>
+          All
+        </button>
+        <button className="btn-ghost" style={{ fontSize: 11, padding: '3px 8px' }}
+          onClick={() => items.forEach(it => selected.has(it.id) && onToggle(it.id))}>
+          None
+        </button>
+      </div>
+      <div style={{ maxHeight: 180, overflowY: 'auto' }}>
+        {filtered.map(it => (
+          <label key={it.id} style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4, cursor: 'pointer', fontSize: 12 }}>
+            <input type="checkbox" checked={selected.has(it.id)} onChange={() => onToggle(it.id)} />
+            {colorMap && colorMap[it.id] && (
+              <span className="legend-dot" style={{ background: colorMap[it.id] }} />
+            )}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.label}</span>
+          </label>
+        ))}
+        {!filtered.length && <div style={{ color: 'var(--c-muted)', fontSize: 12 }}>No matches</div>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Token field with show/hide, paste, and status dot ───────────────────────
+function TokenField({ value, onChange }) {
+  const [show,   setShow]   = useState(false);
+  const [pasted, setPasted] = useState(false);
+  const hasToken = value.length > 0;
+  const hint     = hasToken ? `…${value.slice(-6)}` : null;
+
+  async function handlePaste() {
+    try {
+      const text = await navigator.clipboard.readText();
+      const trimmed = text.trim();
+      if (trimmed) {
+        onChange(trimmed);
+        setPasted(true);
+        setTimeout(() => setPasted(false), 2000);
+      }
+    } catch (_) { /* clipboard permission denied – user pastes manually */ }
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+        {/* Live status dot */}
+        <span style={{
+          width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+          background: hasToken ? '#00C48C' : '#FA4616',
+          boxShadow: hasToken ? '0 0 6px #00C48C88' : '0 0 6px #FA461688',
+          transition: 'background .3s, box-shadow .3s',
+        }} />
+        <span style={{ fontSize: 12, color: 'var(--c-muted)', flex: 1 }}>
+          Personal Access Token
+          {' '}<span style={{ color: '#FA4616', fontSize: 10 }}>(session only)</span>
+        </span>
+        {/* Masked hint of current token */}
+        {hint && (
+          <span style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--c-muted)' }}>{hint}</span>
+        )}
+      </div>
+
+      <div style={{ position: 'relative' }}>
+        <input
+          type={show ? 'text' : 'password'}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder="Paste your PAT here…"
+          autoComplete="off"
+          style={{ paddingRight: 58 }}
+        />
+
+        {/* Show / hide toggle */}
+        <button type="button" onClick={() => setShow(s => !s)}
+          title={show ? 'Hide token' : 'Show token'}
+          style={{ position: 'absolute', right: 30, top: '50%', transform: 'translateY(-50%)',
+            background: 'none', border: 'none', padding: '2px 4px',
+            color: 'var(--c-muted)', cursor: 'pointer', lineHeight: 1 }}>
+          {show ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+              <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+              <line x1="1" y1="1" x2="23" y2="23"/>
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          )}
+        </button>
+
+        {/* Paste from clipboard */}
+        <button type="button" onClick={handlePaste}
+          title={pasted ? 'Pasted!' : 'Paste from clipboard'}
+          style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
+            background: 'none', border: 'none', padding: '2px 4px',
+            color: pasted ? '#00C48C' : 'var(--c-muted)', cursor: 'pointer',
+            lineHeight: 1, transition: 'color .2s' }}>
+          {pasted ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+              <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+            </svg>
+          )}
+        </button>
+      </div>
+
+      {!hasToken && (
+        <div style={{ fontSize: 10, color: '#FA4616', marginTop: 3, lineHeight: 1.4 }}>
+          Required — generate a PAT in UiPath Cloud → My Profile → Personal Access Tokens.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Config panel ─────────────────────────────────────────────────────────────
+function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
+  const [local, setLocal] = useState(cfg);
+  const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
+
+  function handleFetch() {
+    saveConfig(local);
+    onChange(local);
+    onFetch(local);
+  }
+
+  const previewUrl = local.url && local.tenant
+    ? `${local.url.replace(/\/$/, '')}/${local.tenant}${local.apiPrefix || ''}/odata/ProcessSchedules`
+    : null;
+
+  return (
+    <div>
+      <div className="section-label">Orchestrator Connection</div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div className="field-label">Orchestrator URL</div>
+        <input type="text" value={local.url} onChange={e => set('url', e.target.value)}
+          placeholder="https://cloud.uipath.com/org" />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div className="field-label">Tenant</div>
+        <input type="text" value={local.tenant} onChange={e => set('tenant', e.target.value)}
+          placeholder="Default" />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div className="field-label">Folder ID</div>
+        <input type="text" value={local.folder} onChange={e => set('folder', e.target.value)}
+          placeholder="1234" />
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div className="field-label">
+          Orchestrator Path
+          <span style={{ marginLeft: 6, fontSize: 10, background: 'var(--c-bg)',
+            border: '1px solid var(--c-border)', borderRadius: 3, padding: '1px 5px', color: 'var(--c-muted)' }}>
+            Cloud vs on-prem
+          </span>
+        </div>
+        <input type="text" value={local.apiPrefix}
+          onChange={e => set('apiPrefix', e.target.value)}
+          placeholder="/orchestrator_" />
+        <div style={{ fontSize: 10, color: 'var(--c-muted)', marginTop: 3, lineHeight: 1.5 }}>
+          <strong style={{ color: 'var(--c-blue)' }}>Cloud:</strong>{' '}/orchestrator_{' '}
+          &nbsp;·&nbsp;
+          <strong style={{ color: 'var(--c-blue)' }}>On-prem:</strong>{' '}leave blank
+        </div>
+      </div>
+
+      {/* URL preview */}
+      {previewUrl && (
+        <div className="url-preview" style={{ marginBottom: 10 }}>
+          <div className="url-preview-label">URL Preview</div>
+          <div className="url-preview-value">{previewUrl}</div>
+        </div>
+      )}
+
+      <div style={{ marginBottom: 10 }}>
+        <TokenField value={local.token} onChange={v => set('token', v)} />
+      </div>
+
+      <button className="btn-primary" onClick={handleFetch}
+        disabled={loading || !local.url || !local.token}
+        style={{ width: '100%', justifyContent: 'center' }}>
+        {loading ? 'Loading…' : scheduleCount != null ? `Reload (${scheduleCount})` : 'Fetch Schedules'}
+      </button>
+
+      <div style={{ marginTop: 10, fontSize: 11, color: 'var(--c-muted)', lineHeight: 1.6 }}>
+        URL, Tenant, Folder &amp; Proxy saved to localStorage.<br/>
+        Token stored in sessionStorage (clears on tab close).
+      </div>
+    </div>
+  );
+}
+
+// ─── Legend ───────────────────────────────────────────────────────────────────
+function Legend({ schedules, colorMap, selectedProcs, onToggle }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div className="section-label">Legend</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 200, overflowY: 'auto' }}>
+        {schedules.map(s => (
+          <label key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', fontSize: 11 }}>
+            <input type="checkbox" checked={selectedProcs.has(s.id)} onChange={() => onToggle(s.id)} />
+            <span className="legend-dot" style={{ background: colorMap[s.id] }} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}
+              title={s.name}>{s.name}</span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Timezone dropdown ────────────────────────────────────────────────────────
+function TzDropdown({ value, onChange }) {
+  const tzList = useMemo(() => {
+    try { return Intl.supportedValuesOf('timeZone'); } catch (_) { return []; }
+  }, []);
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div className="field-label">Display Timezone</div>
+      <input type="text" list="tz-datalist" value={value} onChange={e => onChange(e.target.value)}
+        placeholder="e.g. America/New_York" />
+      {tzList.length > 0 && (
+        <datalist id="tz-datalist">
+          {tzList.map(tz => <option key={tz} value={tz} />)}
+        </datalist>
+      )}
+      <div style={{ fontSize: 10, color: 'var(--c-muted)', marginTop: 3, lineHeight: 1.5 }}>
+        Fallback when a schedule has no configured timezone.
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+function App() {
+  const [cfg,         setCfg]         = useState(loadConfig);
+  const [theme,       setTheme]       = useState(() => localStorage.getItem(LS_KEYS.theme) || 'dark');
+  const [uiTimezone,  setUiTimezone]  = useState(() =>
+    localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone
+  );
+  const [schedules,   setSchedules]   = useState([]);
+  const [colorMap,    setColorMap]    = useState({});
+  const [selectedProcs, setSelectedProcs] = useState(new Set());
+  const [projDays,    setProjDays]    = useState(30);
+  const [loading,     setLoading]     = useState(false);
+  const [projecting,  setProjecting]  = useState(false);
+  const [error,       setError]       = useState(null);
+  const [eventsByDay, setEventsByDay] = useState({});
+  const [calView,     setCalView]     = useState('month'); // 'month'|'week'|'3day'|'day'
+  const [anchorDate,  setAnchorDate]  = useState(() => {
+    const t = new Date();
+    return new Date(t.getFullYear(), t.getMonth(), 1); // first of current month
+  });
+  const [tooltip,     setTooltip]     = useState({ event: null, pos: { x: 0, y: 0 } });
+
+  // Machines list derived from schedules
+  const machines = useMemo(() => {
+    const seen = new Set();
+    const list = [];
+    schedules.forEach(s => {
+      const m = s.machine || 'Unassigned';
+      if (!seen.has(m)) { seen.add(m); list.push({ id: m, label: m }); }
+    });
+    return list;
+  }, [schedules]);
+
+  const [selectedMachines, setSelectedMachines] = useState(new Set());
+
+  useEffect(() => {
+    if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem(LS_KEYS.theme, theme);
+  }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_KEYS.uiTz, uiTimezone);
+  }, [uiTimezone]);
+
+  useEffect(() => {
+    setSelectedMachines(new Set(machines.map(m => m.id)));
+  }, [machines]);
+
+  // ── Fetch schedules + median durations ──────────────────────────────────────
+  const handleFetch = useCallback(async (fetchCfg) => {
+    setLoading(true);
+    setError(null);
+    setSchedules([]);
+    setEventsByDay({});
+    try {
+      const raw = await fetchSchedules(fetchCfg);
+
+      // Build color map
+      const cm = {};
+      raw.forEach((s, i) => { cm[s.Id] = colorForIndex(i); });
+      setColorMap(cm);
+      setSelectedProcs(new Set(raw.map(s => s.Id)));
+
+      // Fetch job durations in parallel (batches of 10 to avoid flooding)
+      const enriched = [];
+      const BATCH = 10;
+      for (let i = 0; i < raw.length; i += BATCH) {
+        const batch = raw.slice(i, i + BATCH);
+        const results = await Promise.allSettled(
+          batch.map(async s => {
+            let jobs = [];
+            try { jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name); } catch (_) {}
+            return {
+              id:      s.Id,
+              name:    s.ReleaseName || s.Name,
+              cron:    s.StartProcessCron,
+              tz:      s.TimeZoneId,
+              machine: s.MachineRobotAssignment || null,
+              medianMs: medianDurationMs(jobs), // falls back to 5 min when jobs is []
+            };
+          })
+        );
+        results.forEach(r => { if (r.status === 'fulfilled') enriched.push(r.value); });
+      }
+
+      setSchedules(enriched);
+    } catch (err) {
+      const msg = err.message || String(err);
+      if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS') || msg.includes('net::ERR')) {
+        setError('__cors__');
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // ── Project CRON events whenever schedules, filters, or projDays change ─────
+  useEffect(() => {
+    if (!schedules.length) return;
+    setProjecting(true);
+
+    // Defer to next tick to let skeleton render
+    const tid = setTimeout(() => {
+      const byDay = {};
+
+      const filtered = schedules.filter(s =>
+        selectedProcs.has(s.id) &&
+        selectedMachines.has(s.machine || 'Unassigned')
+      );
+
+      filtered.forEach(s => {
+        if (!s.cron) return;
+        const occurrences = projectSchedule(s.cron, s.tz, projDays, s.medianMs, uiTimezone);
+        occurrences.forEach(occ => {
+          const d = occ.start;
+          const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+          if (!byDay[key]) byDay[key] = [];
+          byDay[key].push({ schedule: s, occurrence: occ });
+        });
+      });
+
+      // Sort events within each day by start time
+      Object.values(byDay).forEach(arr =>
+        arr.sort((a, b) => a.occurrence.start - b.occurrence.start)
+      );
+
+      setEventsByDay(byDay);
+      setProjecting(false);
+    }, 20);
+
+    return () => clearTimeout(tid);
+  }, [schedules, selectedProcs, selectedMachines, projDays, uiTimezone]);
+
+  // ── Toggle helpers ───────────────────────────────────────────────────────────
+  const toggleProc    = id => setSelectedProcs(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleMachine = id => setSelectedMachines(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  // ── Tooltip handlers ─────────────────────────────────────────────────────────
+  const handleHover  = useCallback((event, pos) => setTooltip({ event, pos }), []);
+  const handleLeave  = useCallback(() => setTooltip({ event: null, pos: { x: 0, y: 0 } }), []);
+
+  // ── View switching: normalise anchorDate for the target view ─────────────────
+  function switchView(v) {
+    setCalView(v);
+    setAnchorDate(a => {
+      const d = new Date(a.getFullYear(), a.getMonth(), a.getDate());
+      if (v === 'month') return new Date(d.getFullYear(), d.getMonth(), 1);
+      if (v === 'week')  { d.setDate(d.getDate() - d.getDay()); return d; }
+      return d; // '3day' | 'day' keep as-is
+    });
+  }
+
+  // ── Navigation (prev / next / today) ─────────────────────────────────────────
+  function navigate(dir) {
+    setAnchorDate(a => {
+      if (calView === 'month') return new Date(a.getFullYear(), a.getMonth() + dir, 1);
+      const days = calView === 'week' ? 7 : calView === '3day' ? 3 : 1;
+      return addDays(a, days * dir);
+    });
+  }
+  function goToday() {
+    const t = new Date();
+    if (calView === 'month') {
+      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
+    } else if (calView === 'week') {
+      const d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+      d.setDate(d.getDate() - d.getDay());
+      setAnchorDate(d);
+    } else {
+      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), t.getDate()));
+    }
+  }
+
+  // ── Derive days array for time-grid views ─────────────────────────────────────
+  const viewDays = useMemo(() => {
+    if (calView === 'month') return [];
+    const count = calView === 'week' ? 7 : calView === '3day' ? 3 : 1;
+    return Array.from({ length: count }, (_, i) => addDays(anchorDate, i));
+  }, [calView, anchorDate]);
+
+  // ── Navigation label ──────────────────────────────────────────────────────────
+  const navLabel = useMemo(() => {
+    if (calView === 'month') {
+      return anchorDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+    }
+    if (calView === 'day') {
+      return anchorDate.toLocaleDateString('default', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    }
+    const first = viewDays[0], last = viewDays[viewDays.length - 1];
+    if (!first || !last) return '';
+    const sameMonth = first.getMonth() === last.getMonth() && first.getFullYear() === last.getFullYear();
+    const start = first.toLocaleDateString('default', { month: 'short', day: 'numeric' });
+    const end   = sameMonth
+      ? `${last.getDate()}, ${last.getFullYear()}`
+      : last.toLocaleDateString('default', { month: 'short', day: 'numeric', year: 'numeric' });
+    return `${start} – ${end}`;
+  }, [calView, anchorDate, viewDays]);
+
+  // ── Stats ─────────────────────────────────────────────────────────────────────
+  const totalEvents  = useMemo(() => Object.values(eventsByDay).reduce((s, a) => s + a.length, 0), [eventsByDay]);
+  const windowEvents = useMemo(() => {
+    if (calView === 'month') {
+      return Object.entries(eventsByDay)
+        .filter(([k]) => k.startsWith(`${anchorDate.getFullYear()}-${anchorDate.getMonth()}-`))
+        .reduce((s, [, a]) => s + a.length, 0);
+    }
+    return viewDays.reduce((s, d) => {
+      const k = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      return s + (eventsByDay[k] || []).length;
+    }, 0);
+  }, [eventsByDay, calView, anchorDate, viewDays]);
+
+  const procItems    = useMemo(() => schedules.map(s => ({ id: s.id, label: s.name })), [schedules]);
+  const showSkeleton = loading || projecting;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+
+      {/* ── Header ── */}
+      <header className="app-header">
+        {/* Logo / title */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
+          <div style={{ width: 28, height: 28, borderRadius: 6, background: '#FA4616', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+              <line x1="16" y1="2" x2="16" y2="6"/>
+              <line x1="8" y1="2" x2="8" y2="6"/>
+              <line x1="3" y1="10" x2="21" y2="10"/>
+              <line x1="8" y1="14" x2="8.01" y2="14"/>
+              <line x1="12" y1="14" x2="12.01" y2="14"/>
+              <line x1="16" y1="14" x2="16.01" y2="14"/>
+              <line x1="8" y1="18" x2="8.01" y2="18"/>
+              <line x1="12" y1="18" x2="12.01" y2="18"/>
+              <line x1="16" y1="18" x2="16.01" y2="18"/>
+            </svg>
+          </div>
+          <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--c-text)', letterSpacing: '.02em' }}>
+            UiPath Schedule Visualizer
+          </span>
+        </div>
+
+        {/* PAT status badge */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 5, fontSize: 11,
+          background: cfg.token ? 'rgba(0,196,140,.1)' : 'rgba(250,70,22,.1)',
+          border: `1px solid ${cfg.token ? 'rgba(0,196,140,.3)' : 'rgba(250,70,22,.4)'}`,
+          borderRadius: 20, padding: '4px 10px', whiteSpace: 'nowrap', flexShrink: 0,
+          transition: 'background .3s, border-color .3s',
+        }}>
+          <span style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: cfg.token ? '#00C48C' : '#FA4616',
+            boxShadow: cfg.token ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
+          }} />
+          <span style={{ color: cfg.token ? '#00C48C' : '#FA4616', fontWeight: 600 }}>
+            {cfg.token ? `PAT …${cfg.token.slice(-4)}` : 'No token'}
+          </span>
+        </div>
+
+        {/* Projection days */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, color: 'var(--c-muted)', whiteSpace: 'nowrap' }}>
+            Projection Period (Days)
+          </span>
+          <select value={projDays} onChange={e => setProjDays(Number(e.target.value))}
+            style={{ width: 'auto', padding: '5px 8px', fontSize: 12 }}>
+            {[30,60,90,120,365].map(d => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </div>
+
+        {/* View switcher */}
+        <div className="view-switcher">
+          {[
+            { key: 'month', label: 'Month' },
+            { key: 'week',  label: 'Week'  },
+            { key: '3day',  label: '3 Day' },
+            { key: 'day',   label: 'Day'   },
+          ].map(v => (
+            <button key={v.key}
+              className={`view-btn${calView === v.key ? ' active' : ''}`}
+              onClick={() => switchView(v.key)}>
+              {v.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Stats */}
+        {!loading && schedules.length > 0 && (
+          <div style={{ display: 'flex', gap: 16, fontSize: 12, color: 'var(--c-muted)', flexWrap: 'wrap' }}>
+            <span><strong style={{ color: 'var(--c-blue)' }}>{schedules.length}</strong> schedules</span>
+            <span><strong style={{ color: '#FA4616' }}>{totalEvents}</strong> projected</span>
+            <span><strong style={{ color: 'var(--c-text)' }}>{windowEvents}</strong> in view</span>
+          </div>
+        )}
+
+        {/* Refresh */}
+        {schedules.length > 0 && (
+          <button className="btn-primary" onClick={() => handleFetch(cfg)} disabled={loading}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <polyline points="23 4 23 10 17 10"/>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            Refresh
+          </button>
+        )}
+
+        {/* Theme toggle */}
+        <button className="theme-toggle" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+          title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}>
+          {theme === 'dark' ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="5"/>
+              <line x1="12" y1="1" x2="12" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="23"/>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+              <line x1="1" y1="12" x2="3" y2="12"/>
+              <line x1="21" y1="12" x2="23" y2="12"/>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          )}
+        </button>
+      </header>
+
+      {/* ── Body ── */}
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+
+        {/* ── Sidebar ── */}
+        <aside className="sidebar">
+          <CollapsibleSection title="Calendar" defaultOpen>
+            <TzDropdown value={uiTimezone} onChange={setUiTimezone} />
+          </CollapsibleSection>
+
+          <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '6px 0 10px' }} />
+
+          <CollapsibleSection
+            title="Connection"
+            defaultOpen={schedules.length === 0}
+            badge={schedules.length > 0 ? '✓' : null}
+          >
+            <ConfigPanel
+              cfg={cfg}
+              onChange={setCfg}
+              onFetch={handleFetch}
+              loading={loading}
+              scheduleCount={schedules.length || null}
+            />
+          </CollapsibleSection>
+
+          {(schedules.length > 0 || loading) && (
+            <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '10px 0' }} />
+          )}
+
+          {schedules.length > 0 && (
+            <>
+              <CollapsibleSection title="Processes" defaultOpen>
+                <FilterList
+                  label=""
+                  items={procItems}
+                  selected={selectedProcs}
+                  onToggle={toggleProc}
+                  colorMap={colorMap}
+                />
+              </CollapsibleSection>
+              {machines.length > 0 && (
+                <CollapsibleSection title="Machines" defaultOpen={false}>
+                  <FilterList
+                    label=""
+                    items={machines}
+                    selected={selectedMachines}
+                    onToggle={toggleMachine}
+                  />
+                </CollapsibleSection>
+              )}
+            </>
+          )}
+
+          {/* Skeleton sidebar items while loading */}
+          {loading && (
+            <>
+              <div className="section-label" style={{ marginTop: 4 }}>Processes</div>
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <div className="skeleton" style={{ width: 14, height: 14, borderRadius: 3 }} />
+                  <div className="skeleton" style={{ width: 10, height: 10, borderRadius: '50%' }} />
+                  <div className="skeleton" style={{ flex: 1, height: 12 }} />
+                </div>
+              ))}
+            </>
+          )}
+        </aside>
+
+        {/* ── Main content ── */}
+        <main style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
+
+          {/* Empty state */}
+          {!loading && !error && schedules.length === 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 16, color: 'var(--c-muted)' }}>
+              {!cfg.token ? (
+                // ── No token at all ──────────────────────────────────────────
+                <>
+                  <div style={{ padding: '20px 24px', background: 'rgba(250,70,22,.08)',
+                    border: '1px solid rgba(250,70,22,.3)', borderRadius: 10, maxWidth: 400, textAlign: 'center' }}>
+                    <div style={{ fontSize: 28, marginBottom: 8 }}>🔑</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: '#FA4616', marginBottom: 8 }}>
+                      Personal Access Token required
+                    </div>
+                    <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--c-text)' }}>
+                      Paste your UiPath PAT into the <strong>Personal Access Token</strong> field
+                      in the sidebar, then fill in the Orchestrator URL and click{' '}
+                      <strong>Fetch Schedules</strong>.
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--c-muted)', marginTop: 10 }}>
+                      Generate a PAT: UiPath Cloud → My Profile → Personal Access Tokens → + New
+                    </div>
+                  </div>
+                </>
+              ) : (
+                // ── Token present, no data yet ───────────────────────────────
+                <>
+                  <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--c-border)" strokeWidth="1.5">
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                    <line x1="16" y1="2" x2="16" y2="6"/>
+                    <line x1="8"  y1="2" x2="8"  y2="6"/>
+                    <line x1="3"  y1="10" x2="21" y2="10"/>
+                  </svg>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6, color: 'var(--c-text)' }}>
+                      No schedules loaded
+                    </div>
+                    <div style={{ fontSize: 13 }}>
+                      Enter your Orchestrator URL and Folder ID in the sidebar,
+                      then click <strong>Fetch Schedules</strong>.
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 12, color: '#00C48C' }}>
+                      ✓ Token is set
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Calendar nav bar */}
+          {(schedules.length > 0 || showSkeleton) && (
+            <div className="month-nav" style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+              <button onClick={() => navigate(-1)}>‹</button>
+              <span style={{ fontWeight: 700, fontSize: 16, minWidth: 180, textAlign: 'center', color: 'var(--c-text)' }}>
+                {showSkeleton
+                  ? <span className="skeleton" style={{ display: 'inline-block', width: 160, height: 18 }} />
+                  : navLabel}
+              </span>
+              <button onClick={() => navigate(1)}>›</button>
+              <button className="btn-ghost" onClick={goToday}>Today</button>
+            </div>
+          )}
+
+          {/* Calendar grid / time-grid */}
+          {showSkeleton && calView === 'month' && <CalendarSkeleton />}
+          {showSkeleton && calView !== 'month' && (
+            <div style={{ display: 'flex', gap: 2 }}>
+              {Array.from({ length: calView === 'week' ? 7 : calView === '3day' ? 3 : 1 }).map((_, i) => (
+                <div key={i} style={{ flex: 1, minHeight: 400, background: 'var(--c-surface)',
+                  border: '1px solid var(--c-border)', borderRadius: 4, padding: 8 }}>
+                  <div className="skeleton" style={{ width: '40%', height: 12, marginBottom: 8 }} />
+                  <div className="skeleton" style={{ width: '70%', height: 16, marginBottom: 6 }} />
+                  <div className="skeleton" style={{ width: '55%', height: 16 }} />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!showSkeleton && schedules.length > 0 && calView === 'month' && (
+            <CalendarMonth
+              month={anchorDate}
+              eventsByDay={eventsByDay}
+              colorMap={colorMap}
+              onHover={handleHover}
+              onLeave={handleLeave}
+            />
+          )}
+          {!showSkeleton && schedules.length > 0 && calView !== 'month' && (
+            <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 160px)', minHeight: 400 }}>
+              <CalendarTimeGrid
+                days={viewDays}
+                eventsByDay={eventsByDay}
+                colorMap={colorMap}
+                onHover={handleHover}
+                onLeave={handleLeave}
+              />
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Tooltip portal */}
+      <Tooltip event={tooltip.event} pos={tooltip.pos} />
+
+      {/* Toast portal – fixed top-right */}
+      <Toast error={error} onClose={() => setError(null)} />
+    </div>
+  );
+}
+
+// ─── Mount ────────────────────────────────────────────────────────────────────
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);

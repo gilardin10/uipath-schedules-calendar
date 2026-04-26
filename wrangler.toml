@@ -1,0 +1,5 @@
+name = "uipath-schedules-calendar"
+pages_build_output_dir = "."
+
+# Local dev: wrangler pages dev . --port 8788
+# Deploy:    wrangler pages deploy .  (or push to GitHub and connect in CF dashboard)

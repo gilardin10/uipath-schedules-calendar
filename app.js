@@ -13,100 +13,54 @@ const PALETTE = [
 function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 
 // ─── localStorage / sessionStorage helpers ────────────────────────────────────
-const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', proxy: 'usp_proxy', prefix: 'usp_prefix', theme: 'usp_theme', uiTz: 'usp_ui_tz' };
+const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', prefix: 'usp_prefix', theme: 'usp_theme', uiTz: 'usp_ui_tz' };
 const SS_KEY  = 'usp_token';
 
 
 function loadConfig() {
-  // apiPrefix: '/orchestrator_' for UiPath Cloud; '' for on-prem.
-  // Default to '/orchestrator_' — the most common case.
   const storedPrefix = localStorage.getItem(LS_KEYS.prefix);
   return {
     url:       localStorage.getItem(LS_KEYS.url)    || '',
     tenant:    localStorage.getItem(LS_KEYS.tenant) || 'Default',
     folder:    localStorage.getItem(LS_KEYS.folder) || '',
-    proxy:     localStorage.getItem(LS_KEYS.proxy)  || 'https://corsproxy.io/?url=',
     apiPrefix: storedPrefix !== null ? storedPrefix : '/orchestrator_',
     token:     sessionStorage.getItem(SS_KEY)        || '',
   };
 }
-function saveConfig({ url, tenant, folder, proxy, apiPrefix, token }) {
+function saveConfig({ url, tenant, folder, apiPrefix, token }) {
   localStorage.setItem(LS_KEYS.url,    url);
   localStorage.setItem(LS_KEYS.tenant, tenant);
   localStorage.setItem(LS_KEYS.folder, folder);
-  localStorage.setItem(LS_KEYS.proxy,  proxy);
   localStorage.setItem(LS_KEYS.prefix, apiPrefix);
   sessionStorage.setItem(SS_KEY, token);
 }
 
-// ─── UiPath API helpers ────────────────────────────────────────────────────────
-// Build OData query strings manually: URLSearchParams percent-encodes '$' to
-// '%24', which causes Orchestrator to return 400 Bad Request.
-function buildODataQS(params) {
-  return Object.entries(params)
-    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
-    .join('&');
-}
-
-async function apiFetch(cfg, path, params = {}) {
-  const base      = cfg.url.replace(/\/$/, '');
-  const prefix    = (cfg.apiPrefix || '').replace(/\/$/, '');
-  const qs        = Object.keys(params).length ? buildODataQS(params) : '';
-  const apiUrl    = `${base}/${cfg.tenant}${prefix}${path}${qs ? '?' + qs : ''}`;
-  const proxy     = (cfg.proxy || '').trim();
-  const fullUrl   = proxy
-    ? (proxy.endsWith('=') ? `${proxy}${encodeURIComponent(apiUrl)}` : `${proxy}${apiUrl}`)
-    : apiUrl;
-
-  const headers = {
-    'Authorization': `Bearer ${cfg.token}`,
-    'Content-Type':  'application/json',
-  };
-  if (cfg.folder) headers['X-UIPATH-OrganizationUnitId'] = cfg.folder;
-
-  const res = await fetch(fullUrl, { headers });
-  if (res.status === 401) throw new Error(
-    '401: Token expired or invalid. Re-enter your Bearer Token.'
-  );
-  if (res.status === 403) throw new Error(
-    `403: Forbidden — access denied.\nURL: ${apiUrl}\n\n` +
-    `Common causes:\n` +
-    `• PAT is missing required scopes — add OR.Execution, OR.Monitoring, or OR.Jobs (read) scopes when generating the token\n` +
-    `• Folder ID is wrong or the token has no access to that folder — try leaving Folder ID blank to use the default folder\n` +
-    `• The Orchestrator user account lacks the "View" permission on Schedules`
-  );
-  if (res.status === 400) throw new Error(
-    `400: Bad Request.\nURL: ${apiUrl}\n\n` +
-    `Common causes:\n` +
-    `• Orchestrator Path is wrong — Cloud uses /orchestrator_, on-prem is usually empty\n` +
-    `• Tenant name is incorrect\n` +
-    `• Folder ID does not exist in this tenant`
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status} – ${res.statusText}\nURL: ${apiUrl}`);
-  return res.json();
-}
-
-async function fetchSchedules(cfg) {
-  const data = await apiFetch(cfg, '/odata/ProcessSchedules', {
-    '$select': 'Id,Name,StartProcessCron,TimeZoneId,Enabled,ReleaseId,ReleaseName',
-    '$filter': 'Enabled eq true',
-    '$top': 500,
+// ─── API helpers — calls our Cloudflare Pages Function proxy ─────────────────
+// The PAT is sent in the Authorization header to our own same-origin endpoint.
+// Orchestrator is contacted server-side; no CORS proxy required.
+async function proxyFetch(cfg, action, extra = {}) {
+  const res = await fetch('/api/fetch-uipath', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${cfg.token}`,
+      'Content-Type':  'application/json',
+    },
+    body: JSON.stringify({
+      action,
+      orchestratorUrl: cfg.url,
+      tenant:          cfg.tenant,
+      folder:          cfg.folder,
+      apiPrefix:       cfg.apiPrefix,
+      ...extra,
+    }),
   });
-  return (data.value || []);
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data.value;
 }
 
-async function fetchJobsForSchedule(cfg, releaseName) {
-  // Escape single quotes for OData string literals; do NOT encodeURIComponent
-  // here — buildODataQS handles encoding of the entire value.
-  const safeRelease = releaseName.replace(/'/g, "''");
-  const data = await apiFetch(cfg, '/odata/Jobs', {
-    '$filter':  `ReleaseName eq '${safeRelease}'`,
-    '$select':  'Id,StartTime,EndTime,State',
-    '$orderby': 'StartTime desc',
-    '$top':     10,
-  });
-  return (data.value || []);
-}
+async function fetchSchedules(cfg)                       { return proxyFetch(cfg, 'schedules'); }
+async function fetchJobsForSchedule(cfg, releaseName)    { return proxyFetch(cfg, 'jobs', { releaseName }); }
 
 function medianDurationMs(jobs) {
   const durations = jobs
@@ -373,54 +327,19 @@ function Tooltip({ event, pos }) {
 
 // ─── Toast notification ───────────────────────────────────────────────────────
 function Toast({ error, onClose }) {
-  const [expanded, setExpanded] = useState(false);
   if (!error) return null;
-
-  const isCors = error === '__cors__';
-  const title   = isCors ? 'CORS / Network Error' : 'Request Failed';
-  const message = isCors
-    ? 'The browser blocked the request. Requests are routed via corsproxy.io by default — check your Orchestrator URL and token.'
-    : error;
-
-  // Warning icon SVG
-  const Icon = () => (
-    <svg className="toast-icon" width="15" height="15" viewBox="0 0 24 24"
-      fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-      <line x1="12" y1="9" x2="12" y2="13"/>
-      <line x1="12" y1="17" x2="12.01" y2="17"/>
-    </svg>
-  );
-
   return (
     <div className="toast-container">
       <div className="toast toast-error">
-        <Icon />
+        <svg className="toast-icon" width="15" height="15" viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
         <div className="toast-body">
-          <div className="toast-title">{title}</div>
-          <div className="toast-message">{message}</div>
-          {isCors && (
-            <>
-              <button onClick={() => setExpanded(e => !e)}
-                style={{ background: 'none', border: 'none', color: 'var(--c-blue)',
-                  fontSize: 10, cursor: 'pointer', padding: '3px 0 0', fontFamily: 'Inter, sans-serif' }}>
-                {expanded ? '▲ Hide fixes' : '▼ Show fixes'}
-              </button>
-              {expanded && (
-                <div className="toast-detail">
-                  <ol>
-                    <li><strong>corsproxy.io</strong> is active by default. If it's down, try again in a moment.</li>
-                    <li><strong>Browser extension</strong> — install <em>Allow CORS</em> and disable the proxy (clear usp_proxy in localStorage).</li>
-                    <li><strong>Browser extension</strong> — install <em>Allow CORS</em> for Chrome/Firefox.</li>
-                    <li><strong>On-prem</strong> — add your origin to Orchestrator's web.config CORS list.</li>
-                  </ol>
-                  <div style={{ marginTop: 6, color: 'var(--c-muted)' }}>
-                    Token is sent over HTTPS only.
-                  </div>
-                </div>
-              )}
-            </>
-          )}
+          <div className="toast-title">Request Failed</div>
+          <div className="toast-message">{error}</div>
         </div>
         <button className="toast-close" onClick={onClose} title="Dismiss">×</button>
       </div>
@@ -852,8 +771,9 @@ function ConfigPanel({ cfg, onChange, onFetch, loading, scheduleCount }) {
       </button>
 
       <div style={{ marginTop: 10, fontSize: 11, color: 'var(--c-muted)', lineHeight: 1.6 }}>
-        URL, Tenant, Folder &amp; Proxy saved to localStorage.<br/>
-        Token stored in sessionStorage (clears on tab close).
+        URL, Tenant, and Folder saved to localStorage.<br/>
+        Token stored in sessionStorage only (clears on tab close).<br/>
+        All API calls are proxied server-side — your PAT never reaches third parties.
       </div>
     </div>
   );
@@ -988,12 +908,7 @@ function App() {
 
       setSchedules(enriched);
     } catch (err) {
-      const msg = err.message || String(err);
-      if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS') || msg.includes('net::ERR')) {
-        setError('__cors__');
-      } else {
-        setError(msg);
-      }
+      setError(err.message || String(err));
     } finally {
       setLoading(false);
     }

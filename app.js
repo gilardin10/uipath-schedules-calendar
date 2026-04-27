@@ -13,31 +13,37 @@ const PALETTE = [
 function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 
 // ─── localStorage / sessionStorage helpers ────────────────────────────────────
-const LS_KEYS = { url: 'usp_url', tenant: 'usp_tenant', folder: 'usp_folder', prefix: 'usp_prefix', theme: 'usp_theme', uiTz: 'usp_ui_tz', durMin: 'usp_dur_min' };
+const LS_KEYS = { orchestratorUrl: 'usp_orch_url', theme: 'usp_theme', uiTz: 'usp_ui_tz', durMin: 'usp_dur_min' };
 const SS_KEY  = 'usp_token';
 
+// Median duration cache: { [scheduleId]: { ms, at } }
+const MEDIAN_CACHE_KEY = 'usp_medians';
+const MEDIAN_TTL_MS    = 6 * 60 * 60 * 1000; // 6 hours
+function loadMedianCache() {
+  try { return JSON.parse(localStorage.getItem(MEDIAN_CACHE_KEY) || '{}'); } catch { return {}; }
+}
+function saveMedianCache(cache) {
+  try { localStorage.setItem(MEDIAN_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
+}
 
 function loadConfig() {
-  const storedPrefix = localStorage.getItem(LS_KEYS.prefix);
-  return {
-    url:       localStorage.getItem(LS_KEYS.url)    || '',
-    tenant:    localStorage.getItem(LS_KEYS.tenant) || 'Default',
-    folder:    localStorage.getItem(LS_KEYS.folder) || '',
-    apiPrefix: storedPrefix !== null ? storedPrefix : '/orchestrator_',
-    token:     sessionStorage.getItem(SS_KEY)        || '',
-  };
+  const stored = localStorage.getItem(LS_KEYS.orchestratorUrl) || '';
+  if (stored) return { orchestratorUrl: stored, token: sessionStorage.getItem(SS_KEY) || '' };
+  // Migrate from old 3-field format
+  const url    = localStorage.getItem('usp_url')    || '';
+  const tenant = localStorage.getItem('usp_tenant') || 'Default';
+  const prefix = localStorage.getItem('usp_prefix') ?? '/orchestrator_';
+  if (url && tenant) {
+    return { orchestratorUrl: `${url.replace(/\/$/, '')}/${tenant}${prefix}`, token: sessionStorage.getItem(SS_KEY) || '' };
+  }
+  return { orchestratorUrl: '', token: '' };
 }
-function saveConfig({ url, tenant, folder, apiPrefix, token }) {
-  localStorage.setItem(LS_KEYS.url,    url);
-  localStorage.setItem(LS_KEYS.tenant, tenant);
-  localStorage.setItem(LS_KEYS.folder, folder);
-  localStorage.setItem(LS_KEYS.prefix, apiPrefix);
+function saveConfig({ orchestratorUrl, token }) {
+  localStorage.setItem(LS_KEYS.orchestratorUrl, orchestratorUrl);
   sessionStorage.setItem(SS_KEY, token);
 }
 
 // ─── API helpers — calls our Cloudflare Pages Function proxy ─────────────────
-// The PAT is sent in the Authorization header to our own same-origin endpoint.
-// Orchestrator is contacted server-side; no CORS proxy required.
 async function proxyFetch(cfg, action, extra = {}) {
   const res = await fetch('/api/fetch-uipath', {
     method: 'POST',
@@ -47,10 +53,8 @@ async function proxyFetch(cfg, action, extra = {}) {
     },
     body: JSON.stringify({
       action,
-      orchestratorUrl: cfg.url,
-      tenant:          cfg.tenant,
+      orchestratorUrl: cfg.orchestratorUrl,
       folder:          cfg.folder,
-      apiPrefix:       cfg.apiPrefix,
       ...extra,
     }),
   });
@@ -338,15 +342,27 @@ function CollapsibleSection({ title, children, defaultOpen = true, badge }) {
 function computeEventCols(events) {
   if (!events.length) return [];
   const sorted = [...events].sort((a, b) => a.occurrence.start - b.occurrence.start);
-  const colEnds = []; // track the end-time of the last event in each column
+  // Greedy column assignment
+  const colEnds = [];
   const assignments = sorted.map(ev => {
     let col = colEnds.findIndex(end => ev.occurrence.start >= end);
     if (col === -1) col = colEnds.length;
     colEnds[col] = ev.occurrence.end;
     return col;
   });
-  const totalCols = colEnds.length || 1;
-  return sorted.map((ev, i) => ({ ev, col: assignments[i], totalCols }));
+  // Per-event totalCols = max col index among all events that overlap with it + 1
+  // This lets non-overlapping events keep full width (totalCols = 1)
+  return sorted.map((ev, i) => {
+    const s = ev.occurrence.start.getTime();
+    const e = ev.occurrence.end.getTime();
+    let maxCol = assignments[i];
+    for (let j = 0; j < sorted.length; j++) {
+      const os = sorted[j].occurrence.start.getTime();
+      const oe = sorted[j].occurrence.end.getTime();
+      if (os < e && oe > s) maxCol = Math.max(maxCol, assignments[j]);
+    }
+    return { ev, col: assignments[i], totalCols: maxCol + 1 };
+  });
 }
 
 // ─── Skeleton components ──────────────────────────────────────────────────────
@@ -377,18 +393,19 @@ function CalendarSkeleton() {
 }
 
 // ─── Tooltip ─────────────────────────────────────────────────────────────────
-function Tooltip({ event, pos, uiTimezone }) {
+function Tooltip({ event, pos, uiTimezone, machineTemplates }) {
   if (!event) return null;
   const { schedule, occurrence } = event;
   const dur = occurrence.end - occurrence.start;
   const humanCron = cronToHuman(schedule.cron);
   const argEntries = schedule.inputArgs ? Object.entries(schedule.inputArgs) : [];
+  const slotCount = schedule.machine && machineTemplates ? machineTemplates[schedule.machine] : 0;
   return (
     <div className="tooltip" style={{ left: pos.x + 12, top: pos.y + 12 }}>
       <div className="tooltip-title">{schedule.name}</div>
       {event.gapWarning && (
         <div className="tooltip-row tooltip-warn">
-          <span>⚠ Less than 5 min before next job on this machine</span>
+          <span>⚠️ Less than 5 min before next run on this machine</span>
         </div>
       )}
       <div className="tooltip-row">
@@ -412,13 +429,22 @@ function Tooltip({ event, pos, uiTimezone }) {
       {schedule.machine && (
         <div className="tooltip-row">
           <span className="tooltip-label">Machine</span>
-          <span className="tooltip-value">{schedule.machine}</span>
+          <span className="tooltip-value">
+            {schedule.machine}
+            {slotCount > 1 && <span className="tooltip-badge"> · Template ({slotCount} slots)</span>}
+          </span>
         </div>
       )}
       {schedule.serviceAccount && (
         <div className="tooltip-row">
           <span className="tooltip-label">Account</span>
           <span className="tooltip-value">{schedule.serviceAccount}</span>
+        </div>
+      )}
+      {schedule.tags && schedule.tags.length > 0 && (
+        <div className="tooltip-row">
+          <span className="tooltip-label">Tags</span>
+          <span className="tooltip-value">{schedule.tags.join(', ')}</span>
         </div>
       )}
       {argEntries.length > 0 && (
@@ -561,7 +587,7 @@ function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave, uiTimez
 // ─── Time-grid view (week / 3-day / day) ─────────────────────────────────────
 const HOUR_H = 52; // px per hour row
 
-function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave, uiTimezone }) {
+function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave, uiTimezone, machineTemplates }) {
   const scrollRef = useRef(null);
   const today = new Date();
 
@@ -657,31 +683,42 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave, uiTim
 
                 {/* Events */}
                 {laid.map(({ ev, col, totalCols }, i) => {
-                  const startMin = eventStartMin(ev.occurrence.start);
-                  const durMin   = Math.max((ev.occurrence.end - ev.occurrence.start) / 60000, 15);
-                  const topPx    = (startMin / 60) * HOUR_H;
-                  const heightPx = Math.max((durMin / 60) * HOUR_H - 2, 18);
-                  const color    = colorMap[ev.schedule.id] || 'var(--c-muted)';
-                  const pct      = 100 / totalCols;
+                  const startMin  = eventStartMin(ev.occurrence.start);
+                  const durMin    = Math.max((ev.occurrence.end - ev.occurrence.start) / 60000, 15);
+                  const topPx     = (startMin / 60) * HOUR_H;
+                  const heightPx  = Math.max((durMin / 60) * HOUR_H - 2, 18);
+                  const color     = colorMap[ev.schedule.id] || 'var(--c-muted)';
+                  const pct       = 100 / totalCols;
+                  const machine   = ev.schedule.machine;
+                  const slotCount = machine && machineTemplates ? machineTemplates[machine] : 0;
                   return (
-                    <div key={i} className="tg-event"
-                      style={{
-                        top: topPx + 1, height: heightPx,
-                        left: `${col * pct}%`,
-                        width: `${pct}%`,
-                        background: color + '28',
-                        borderLeft: `3px solid ${color}`,
-                        color,
-                      }}
-                      onMouseEnter={e => onHover(ev, { x: e.clientX, y: e.clientY })}
-                      onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
-                      onMouseLeave={onLeave}>
-                      {heightPx >= 28 && <div className="tg-event-time">{fmtTime(ev.occurrence.start, uiTimezone)}</div>}
-                      <div className="tg-event-name">
-                        {ev.gapWarning && <span className="gap-warn-icon" title="Less than 5 min gap to next job">⚠</span>}
-                        {ev.schedule.name}
+                    <React.Fragment key={i}>
+                      {/* Template capacity background bar */}
+                      {slotCount > 1 && col === 0 && (
+                        <div className="tg-template-bar" style={{ top: topPx + 1, height: heightPx, background: color + '0C' }}
+                          title={`Machine template: ${slotCount} parallel slots`}>
+                          <span className="tg-template-slots">{slotCount}⊠</span>
+                        </div>
+                      )}
+                      <div className="tg-event"
+                        style={{
+                          top: topPx + 1, height: heightPx,
+                          left: `${col * pct}%`,
+                          width: `${pct}%`,
+                          background: color + '28',
+                          borderLeft: `3px solid ${color}`,
+                          color,
+                        }}
+                        onMouseEnter={e => onHover(ev, { x: e.clientX, y: e.clientY })}
+                        onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
+                        onMouseLeave={onLeave}>
+                        {heightPx >= 28 && <div className="tg-event-time">{fmtTime(ev.occurrence.start, uiTimezone)}</div>}
+                        <div className="tg-event-name">
+                          {ev.gapWarning && <span className="gap-warn-icon" title="Less than 5 min gap to next run on this machine">⚠️</span>}
+                          {ev.schedule.name}
+                        </div>
                       </div>
-                    </div>
+                    </React.Fragment>
                   );
                 })}
               </div>
@@ -896,10 +933,6 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
   const [local, setLocal] = useState(cfg);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
 
-  const previewUrl = local.url && local.tenant
-    ? `${local.url.replace(/\/$/, '')}/${local.tenant}${local.apiPrefix || ''}/odata/ProcessSchedules`
-    : null;
-
   function handleSave() {
     saveConfig(local);
     onSave(local);
@@ -913,50 +946,27 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
         <div className="modal-field">
           <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
             Orchestrator URL
-            <HintIcon text="Base URL of your UiPath Cloud or on-prem instance, e.g. https://cloud.uipath.com/myorg" />
+            <HintIcon text="Full URL to your Cloud Orchestrator, including org, tenant, and API prefix. Copy it from the browser address bar when inside Orchestrator." />
           </div>
-          <input type="text" value={local.url} onChange={e => set('url', e.target.value)}
-            placeholder="https://cloud.uipath.com/org" />
-        </div>
-        <div className="modal-field">
-          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
-            Tenant
-            <HintIcon text="Orchestrator tenant name, visible in the URL after the org segment. Usually 'Default'." />
-          </div>
-          <input type="text" value={local.tenant} onChange={e => set('tenant', e.target.value)}
-            placeholder="Default" />
-        </div>
-        <div className="modal-field">
-          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
-            API Path Prefix
-            <HintIcon text="Cloud Orchestrator: /orchestrator_  ·  On-prem: leave blank." />
-          </div>
-          <input type="text" value={local.apiPrefix} onChange={e => set('apiPrefix', e.target.value)}
-            placeholder="/orchestrator_" />
+          <input type="text" value={local.orchestratorUrl} onChange={e => set('orchestratorUrl', e.target.value)}
+            placeholder="https://cloud.uipath.com/org/tenant/orchestrator_" />
           <div className="field-hint">
-            <strong style={{ color: 'var(--c-blue)' }}>Cloud:</strong> /orchestrator_
-            &nbsp;·&nbsp;
-            <strong style={{ color: 'var(--c-blue)' }}>On-prem:</strong> leave blank
+            Copy the URL from your browser while on the Orchestrator page,
+            up to and including <strong style={{ color: 'var(--c-blue)' }}>/orchestrator_</strong>
           </div>
         </div>
-        {previewUrl && (
-          <div className="url-preview">
-            <div className="url-preview-label">URL Preview</div>
-            <div className="url-preview-value">{previewUrl}</div>
-          </div>
-        )}
         <div className="modal-field">
           <TokenField value={local.token} onChange={v => set('token', v)} />
         </div>
         <div className="field-hint">
-          URL &amp; Tenant saved to localStorage. Token in sessionStorage only — cleared on tab close.
+          URL saved to localStorage. Token in sessionStorage only — cleared on tab close.
           All API calls go through the server-side proxy; your PAT never leaves this domain.
         </div>
       </div>
       <div className="popover-footer">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn-primary" onClick={handleSave}
-          disabled={loading || !local.url || !local.token}
+          disabled={loading || !local.orchestratorUrl || !local.token}
           style={{ flex: 1, justifyContent: 'center' }}>
           {loading ? 'Loading…' : 'Save & Fetch'}
         </button>
@@ -979,8 +989,11 @@ function SettingsPopover({ projDays, onProjDays, defaultDurMin, onDurMin, theme,
             Projection Period
             <HintIcon text="How many days ahead to compute scheduled run occurrences. Longer periods use more CPU." />
           </div>
-          <select value={projDays} onChange={e => onProjDays(Number(e.target.value))}>
-            {[7, 14, 30, 60].map(d => <option key={d} value={d}>{d} days</option>)}
+          <select value={projDays} onChange={e => onProjDays(Number(e.target.value))}
+            style={{ fontSize: 13 }}>
+            {[7, 14, 30, 60, 90].map(d => (
+              <option key={d} value={d} style={{ paddingLeft: 6, fontSize: 13 }}>{d} days</option>
+            ))}
           </select>
         </div>
         <div className="modal-field">
@@ -1068,7 +1081,7 @@ function App() {
   const [selectedProcs,    setSelectedProcs]    = useState(new Set());
   const [projDays,         setProjDays]         = useState(() => {
     const d = parseInt(new URLSearchParams(window.location.search).get('days'), 10);
-    return (d > 0 && d <= 365) ? d : 30;
+    return (d > 0 && d <= 365) ? d : 7;
   });
   const [loading,     setLoading]     = useState(false);
   const [projecting,  setProjecting]  = useState(false);
@@ -1081,12 +1094,15 @@ function App() {
   const calViewRef = useRef('month');
   useEffect(() => { calViewRef.current = calView; }, [calView]);
   // Holds URL filter state captured at the start of each handleFetch call
-  const pendingHiddenFiltersRef = useRef({ procs: new Set(), machines: new Set(), folders: new Set() });
+  const pendingHiddenFiltersRef = useRef({ procs: new Set(), machines: new Set(), folders: new Set(), tags: new Set() });
   const [anchorDate,  setAnchorDate]  = useState(() => {
     const t = new Date();
-    return new Date(t.getFullYear(), t.getMonth(), 1); // first of current month
+    return new Date(t.getFullYear(), t.getMonth(), 1);
   });
-  const [tooltip,     setTooltip]     = useState({ event: null, pos: { x: 0, y: 0 } });
+  const [tooltip,        setTooltip]        = useState({ event: null, pos: { x: 0, y: 0 } });
+  const [machineTemplates, setMachineTemplates] = useState({}); // { machineName: slotCount }
+  const [allTags,          setAllTags]          = useState([]); // sorted unique tag strings
+  const [selectedTags,     setSelectedTags]     = useState(new Set());
 
   // Machines list derived from schedules
   const machines = useMemo(() => {
@@ -1125,8 +1141,13 @@ function App() {
     setSelectedFolders(new Set(folders.map(f => String(f.Id)).filter(id => !hidden.has(id))));
   }, [folders]);
 
+  useEffect(() => {
+    const hidden = pendingHiddenFiltersRef.current.tags;
+    setSelectedTags(new Set(allTags.filter(t => !hidden.has(t))));
+  }, [allTags]);
+
   // ── Fetch schedules + median durations ──────────────────────────────────────
-  const handleFetch = useCallback(async (fetchCfg) => {
+  const handleFetch = useCallback(async (fetchCfg, forceRefresh = false) => {
     setLoading(true);
     setError(null);
     setSchedules([]);
@@ -1138,6 +1159,7 @@ function App() {
       procs:    new Set((_urlP.get('hp') || '').split(',').filter(Boolean)),
       machines: new Set((_urlP.get('hm') || '').split(',').filter(Boolean)),
       folders:  new Set((_urlP.get('hf') || '').split(',').filter(Boolean)),
+      tags:     new Set((_urlP.get('ht') || '').split(',').filter(Boolean)),
     };
     try {
       // Step 1: discover all accessible folders
@@ -1171,6 +1193,30 @@ function App() {
         }
       }));
 
+      // Step 2b: fetch machine templates and release tags per folder (best-effort, in parallel)
+      const machineMap = {}; // machineName → slotCount
+      const releaseTagMap = {}; // releaseName → string[]
+      await Promise.allSettled(discoveredFolders.map(async f => {
+        const cfgF = { ...fetchCfg, folder: String(f.Id) };
+        try {
+          const machines = await proxyFetch(cfgF, 'machines');
+          for (const m of machines) {
+            // Identify templates: NonProductionSlots > 0 or Type contains 'Template'
+            const slots = m.NonProductionSlots || 0;
+            const isTemplate = slots > 1 || (m.Type || '').toLowerCase().includes('template');
+            if (isTemplate && m.Name) machineMap[m.Name] = slots || 2;
+          }
+        } catch (_) { /* graceful: machines endpoint may not exist */ }
+        try {
+          const releases = await proxyFetch(cfgF, 'releaseTags');
+          for (const r of releases) {
+            if (!r.Name || !r.Tags?.length) continue;
+            releaseTagMap[r.Name] = r.Tags.map(t => t.DisplayName || t.Name || String(t)).filter(Boolean);
+          }
+        } catch (_) { /* graceful */ }
+      }));
+      setMachineTemplates({ ...machineMap });
+
       // Build color map
       const cm = {};
       allRaw.forEach((s, i) => { cm[s.Id] = colorForIndex(i); });
@@ -1178,21 +1224,32 @@ function App() {
       const _hiddenProcs = pendingHiddenFiltersRef.current.procs;
       setSelectedProcs(new Set(allRaw.map(s => s.Id).filter(id => !_hiddenProcs.has(String(id)))));
 
-      // Step 3: enrich each schedule with job history
+      // Step 3: enrich each schedule with job history (uses cache when fresh)
       const enriched = [];
       const BATCH = 10;
       const fallbackMs = defaultDurMin * 60 * 1000;
+      const medianCache = loadMedianCache();
+      const now = Date.now();
       for (let i = 0; i < allRaw.length; i += BATCH) {
         const batch = allRaw.slice(i, i + BATCH);
         const results = await Promise.allSettled(
           batch.map(async s => {
-            let jobs = [];
-            try { jobs = await fetchJobsForSchedule({ ...fetchCfg, folder: s._folderId }, s.ReleaseName || s.Name); }
-            catch (e) { console.warn('[USV] Job history unavailable for', s.ReleaseName || s.Name, '—', e.message); }
-            const rawArgs = s.InputArguments || jobs[0]?.InputArguments || null;
+            let medianMs;
+            const cached = medianCache[s.Id];
+            if (!forceRefresh && cached && (now - cached.at < MEDIAN_TTL_MS)) {
+              medianMs = cached.ms;
+            } else {
+              let jobs = [];
+              try { jobs = await fetchJobsForSchedule({ ...fetchCfg, folder: s._folderId }, s.ReleaseName || s.Name); }
+              catch (e) { console.warn('[USV] Job history unavailable for', s.ReleaseName || s.Name, '—', e.message); }
+              medianMs = medianDurationMs(jobs, fallbackMs);
+              medianCache[s.Id] = { ms: medianMs, at: now };
+            }
+            const rawName = s.ReleaseName || s.Name;
+            const rawArgs = s.InputArguments || null;
             return {
               id:             s.Id,
-              name:           s.ReleaseName || s.Name,
+              name:           rawName,
               cron:           s.StartProcessCron,
               tz:             s.TimeZoneId,
               machine:        s.MachineRobotAssignment || null,
@@ -1200,12 +1257,19 @@ function App() {
               inputArgs:      parseInputArgs(rawArgs),
               folderId:       s._folderId,
               folderName:     s._folderName,
-              medianMs:       medianDurationMs(jobs, fallbackMs),
+              tags:           releaseTagMap[rawName] || [],
+              medianMs,
             };
           })
         );
         results.forEach(r => { if (r.status === 'fulfilled') enriched.push(r.value); });
       }
+      saveMedianCache(medianCache);
+
+      // Collect all unique tags and initialize selection
+      const tagSet = new Set();
+      enriched.forEach(s => s.tags.forEach(t => tagSet.add(t)));
+      setAllTags([...tagSet].sort());
 
       setSchedules(enriched);
       // Jump calendar to today in the current view after successful load
@@ -1239,7 +1303,8 @@ function App() {
       const filtered = schedules.filter(s =>
         selectedProcs.has(s.id) &&
         selectedMachines.has(s.machine || 'Unassigned') &&
-        (selectedFolders.size === 0 || selectedFolders.has(s.folderId || ''))
+        (selectedFolders.size === 0 || selectedFolders.has(s.folderId || '')) &&
+        (s.tags.length === 0 || s.tags.every(t => selectedTags.has(t)))
       );
 
       filtered.forEach(s => {
@@ -1279,7 +1344,7 @@ function App() {
     }, 20);
 
     return () => clearTimeout(tid);
-  }, [schedules, selectedProcs, selectedMachines, selectedFolders, projDays, uiTimezone]);
+  }, [schedules, selectedProcs, selectedMachines, selectedFolders, selectedTags, projDays, uiTimezone]);
 
   // ── Sync filter state to URL (enables refresh/share persistence) ─────────────
   useEffect(() => {
@@ -1291,18 +1356,21 @@ function App() {
     if (hiddenMachines.length) p.set('hm', hiddenMachines.join(','));
     const hiddenFolders = folders.map(f => String(f.Id)).filter(id => !selectedFolders.has(id));
     if (hiddenFolders.length) p.set('hf', hiddenFolders.join(','));
+    const hiddenTags = allTags.filter(t => !selectedTags.has(t));
+    if (hiddenTags.length) p.set('ht', hiddenTags.join(','));
     if (calView !== 'month') p.set('view', calView);
-    if (projDays !== 30) p.set('days', String(projDays));
+    if (projDays !== 7) p.set('days', String(projDays));
     const defaultTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (uiTimezone && uiTimezone !== defaultTz) p.set('tz', uiTimezone);
     const qs = p.toString();
     window.history.replaceState(null, '', qs ? `?${qs}` : window.location.pathname);
-  }, [schedules, selectedProcs, selectedMachines, selectedFolders, calView, projDays, uiTimezone, machines, folders]);
+  }, [schedules, selectedProcs, selectedMachines, selectedFolders, selectedTags, allTags, calView, projDays, uiTimezone, machines, folders]);
 
   // ── Toggle helpers ───────────────────────────────────────────────────────────
   const toggleProc    = id => setSelectedProcs(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleMachine = id => setSelectedMachines(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleFolder  = id => setSelectedFolders(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleTag     = id => setSelectedTags(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   // ── Tooltip handlers ─────────────────────────────────────────────────────────
   const handleHover  = useCallback((event, pos) => setTooltip({ event, pos }), []);
@@ -1389,6 +1457,7 @@ function App() {
 
   const procItems    = useMemo(() => schedules.map(s => ({ id: s.id, label: s.name })), [schedules]);
   const folderItems  = useMemo(() => folders.map(f => ({ id: String(f.Id), label: f.DisplayName || f.FullyQualifiedName || String(f.Id) })), [folders]);
+  const tagItems     = useMemo(() => allTags.map(t => ({ id: t, label: t })), [allTags]);
   const showSkeleton = loading || projecting;
 
   return (
@@ -1481,15 +1550,25 @@ function App() {
           </div>
         )}
 
-        {/* Refresh */}
+        {/* Refresh (fast, uses duration cache) + Full Refresh */}
         {schedules.length > 0 && (
-          <button className="btn-primary" onClick={() => handleFetch(cfg)} disabled={loading}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <polyline points="23 4 23 10 17 10"/>
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-            </svg>
-            Refresh
-          </button>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button className="btn-primary" onClick={() => handleFetch(cfg, false)} disabled={loading}
+              title="Re-fetch schedules (uses cached job durations for speed)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <polyline points="23 4 23 10 17 10"/>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+              Refresh
+            </button>
+            <button className="btn-ghost" onClick={() => handleFetch(cfg, true)} disabled={loading}
+              title="Full refresh — re-fetches job history for accurate durations" style={{ padding: '5px 8px' }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <polyline points="23 4 23 10 17 10"/>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+            </button>
+          </div>
         )}
       </header>
 
@@ -1532,6 +1611,20 @@ function App() {
                         items={folderItems}
                         selected={selectedFolders}
                         onToggle={toggleFolder}
+                      />
+                    </CollapsibleSection>
+                  </>
+                )}
+                {tagItems.length > 0 && (
+                  <>
+                    <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '6px 0 10px' }} />
+                    <CollapsibleSection title="Tags" defaultOpen={false}>
+                      <div className="field-hint" style={{ marginBottom: 6 }}>Uncheck a tag to hide those jobs</div>
+                      <FilterList
+                        label=""
+                        items={tagItems}
+                        selected={selectedTags}
+                        onToggle={toggleTag}
                       />
                     </CollapsibleSection>
                   </>
@@ -1654,6 +1747,7 @@ function App() {
                 onHover={handleHover}
                 onLeave={handleLeave}
                 uiTimezone={uiTimezone}
+                machineTemplates={machineTemplates}
               />
             </div>
           )}
@@ -1661,7 +1755,7 @@ function App() {
       </div>
 
       {/* Tooltip portal */}
-      <Tooltip event={tooltip.event} pos={tooltip.pos} uiTimezone={uiTimezone} />
+      <Tooltip event={tooltip.event} pos={tooltip.pos} uiTimezone={uiTimezone} machineTemplates={machineTemplates} />
 
       {/* Toast portal – fixed top-right */}
       <Toast error={error} onClose={() => setError(null)} />

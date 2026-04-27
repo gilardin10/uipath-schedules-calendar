@@ -569,7 +569,7 @@ input[type=checkbox] {
   white-space: nowrap;
   line-height: 1;
 }
-.tg-col { flex: 1; position: relative; border-left: 1px solid var(--c-border); min-width: 0; }
+.tg-col { flex: 1; position: relative; border-left: 1px solid var(--c-border); min-width: 0; overflow: hidden; }
 .tg-hour-line {
   position: absolute; left: 0; right: 0;
   border-top: 1px solid var(--c-border);
@@ -609,6 +609,31 @@ input[type=checkbox] {
 .tg-event:hover { filter: brightness(1.15); z-index: 2; }
 .tg-event-time { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tg-event-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .88; }
+
+/* ── Machine template capacity bar (behind event pills) ─────────────────── */
+.tg-template-bar {
+  position: absolute;
+  left: 0; right: 0;
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 2px 3px;
+}
+.tg-template-slots {
+  font-size: 8px;
+  font-weight: 700;
+  opacity: .45;
+  font-family: 'Inter', system-ui, sans-serif;
+  letter-spacing: .02em;
+}
+.tooltip-badge {
+  font-size: 10px;
+  opacity: .7;
+  margin-left: 2px;
+}
 
 /* ── URL preview block ───────────────────────────────────────────────────── */
 .url-preview {

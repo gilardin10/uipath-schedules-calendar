@@ -1,4 +1,4 @@
-// UiPath Schedule Visualizer – Apollo Dark Mode
+// UiPath Job Schedules – Apollo Dark Mode
 // React 18 + Babel standalone + cron-parser + Lucide
 
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
@@ -667,8 +667,8 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave, uiTim
                     <div key={i} className="tg-event"
                       style={{
                         top: topPx + 1, height: heightPx,
-                        left: `calc(${col * pct}% + 2px)`,
-                        width: `calc(${pct}% - 4px)`,
+                        left: `${col * pct}%`,
+                        width: `${pct}%`,
                         background: color + '28',
                         borderLeft: `3px solid ${color}`,
                         color,
@@ -1055,23 +1055,33 @@ function Legend({ schedules, colorMap, selectedProcs, onToggle }) {
 function App() {
   const [cfg,              setCfg]              = useState(loadConfig);
   const [theme,            setTheme]            = useState(() => localStorage.getItem(LS_KEYS.theme) || 'dark');
-  const [uiTimezone,       setUiTimezone]       = useState(() =>
-    localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone
-  );
+  const [uiTimezone,       setUiTimezone]       = useState(() => {
+    const tzUrl = new URLSearchParams(window.location.search).get('tz');
+    if (tzUrl) return tzUrl;
+    return localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  });
   const [defaultDurMin,    setDefaultDurMin]    = useState(() => Number(localStorage.getItem(LS_KEYS.durMin)) || 5);
   const [schedules,        setSchedules]        = useState([]);
   const [folders,          setFolders]          = useState([]);
   const [selectedFolders,  setSelectedFolders]  = useState(new Set());
   const [colorMap,         setColorMap]         = useState({});
   const [selectedProcs,    setSelectedProcs]    = useState(new Set());
-  const [projDays,         setProjDays]         = useState(30);
+  const [projDays,         setProjDays]         = useState(() => {
+    const d = parseInt(new URLSearchParams(window.location.search).get('days'), 10);
+    return (d > 0 && d <= 365) ? d : 30;
+  });
   const [loading,     setLoading]     = useState(false);
   const [projecting,  setProjecting]  = useState(false);
   const [error,       setError]       = useState(null);
   const [eventsByDay, setEventsByDay] = useState({});
-  const [calView,     setCalView]     = useState('month'); // 'month'|'week'|'3day'|'day'
+  const [calView,     setCalView]     = useState(() => {
+    const v = new URLSearchParams(window.location.search).get('view');
+    return ['month','week','3day','day'].includes(v) ? v : 'month';
+  });
   const calViewRef = useRef('month');
   useEffect(() => { calViewRef.current = calView; }, [calView]);
+  // Holds URL filter state captured at the start of each handleFetch call
+  const pendingHiddenFiltersRef = useRef({ procs: new Set(), machines: new Set(), folders: new Set() });
   const [anchorDate,  setAnchorDate]  = useState(() => {
     const t = new Date();
     return new Date(t.getFullYear(), t.getMonth(), 1); // first of current month
@@ -1106,7 +1116,8 @@ function App() {
   }, [defaultDurMin]);
 
   useEffect(() => {
-    setSelectedMachines(new Set(machines.map(m => m.id)));
+    const hidden = pendingHiddenFiltersRef.current.machines;
+    setSelectedMachines(new Set(machines.map(m => m.id).filter(id => !hidden.has(id))));
   }, [machines]);
 
   useEffect(() => {
@@ -1120,6 +1131,13 @@ function App() {
     setSchedules([]);
     setFolders([]);
     setEventsByDay({});
+    // Snapshot URL filter params at fetch start so effects can apply them consistently
+    const _urlP = new URLSearchParams(window.location.search);
+    pendingHiddenFiltersRef.current = {
+      procs:    new Set((_urlP.get('hp') || '').split(',').filter(Boolean)),
+      machines: new Set((_urlP.get('hm') || '').split(',').filter(Boolean)),
+      folders:  new Set((_urlP.get('hf') || '').split(',').filter(Boolean)),
+    };
     try {
       // Step 1: discover all accessible folders
       let discoveredFolders = [];
@@ -1375,7 +1393,7 @@ function App() {
             </svg>
           </div>
           <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--c-text)', letterSpacing: '.02em' }}>
-            UiPath Schedule Visualizer
+            UiPath Job Schedules
           </span>
         </div>
 

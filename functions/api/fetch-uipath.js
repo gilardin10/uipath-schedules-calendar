@@ -106,7 +106,7 @@ export async function onRequestPost({ request }) {
       client_id: clientId, 
       client_secret: clientSecret,
       // Use specific scopes instead of OR.Default
-      scope: 'OR.Folders.Read OR.Execution.Read OR.Machines.Read'
+      scope: 'OR.Folders.Read OR.Execution.Read OR.Machines.Read OR.Users.Read OR.Queues.Read OR.Assets.Read'    
     });
 
     let tokenRes;

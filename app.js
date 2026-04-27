@@ -13,8 +13,16 @@ const PALETTE = [
 function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 
 // ─── localStorage / sessionStorage helpers ────────────────────────────────────
-const LS_KEYS = { orchestratorUrl: 'usp_orch_url', theme: 'usp_theme', uiTz: 'usp_ui_tz', durMin: 'usp_dur_min' };
-const SS_KEY  = 'usp_token';
+const LS_KEYS = {
+  orchestratorUrl: 'usp_orch_url',
+  theme:    'usp_theme',
+  uiTz:     'usp_ui_tz',
+  durMin:   'usp_dur_min',
+  authMode: 'usp_auth_mode',
+  clientId: 'usp_client_id',
+};
+const SS_KEY        = 'usp_token';
+const SS_KEY_SECRET = 'usp_csecret';
 
 // Median duration cache: { [scheduleId]: { ms, at } }
 const MEDIAN_CACHE_KEY = 'usp_medians';
@@ -27,20 +35,36 @@ function saveMedianCache(cache) {
 }
 
 function loadConfig() {
-  const stored = localStorage.getItem(LS_KEYS.orchestratorUrl) || '';
-  if (stored) return { orchestratorUrl: stored, token: sessionStorage.getItem(SS_KEY) || '' };
+  const stored   = localStorage.getItem(LS_KEYS.orchestratorUrl) || '';
+  const authMode = localStorage.getItem(LS_KEYS.authMode) || 'pat';
+  const clientId = localStorage.getItem(LS_KEYS.clientId) || '';
+  const clientSecret = sessionStorage.getItem(SS_KEY_SECRET) || '';
+  if (stored) {
+    return {
+      orchestratorUrl: stored,
+      token:  sessionStorage.getItem(SS_KEY) || '',
+      authMode, clientId, clientSecret,
+    };
+  }
   // Migrate from old 3-field format
   const url    = localStorage.getItem('usp_url')    || '';
   const tenant = localStorage.getItem('usp_tenant') || 'Default';
   const prefix = localStorage.getItem('usp_prefix') ?? '/orchestrator_';
   if (url && tenant) {
-    return { orchestratorUrl: `${url.replace(/\/$/, '')}/${tenant}${prefix}`, token: sessionStorage.getItem(SS_KEY) || '' };
+    return {
+      orchestratorUrl: `${url.replace(/\/$/, '')}/${tenant}${prefix}`,
+      token: sessionStorage.getItem(SS_KEY) || '',
+      authMode, clientId, clientSecret,
+    };
   }
-  return { orchestratorUrl: '', token: '' };
+  return { orchestratorUrl: '', token: '', authMode: 'pat', clientId: '', clientSecret: '' };
 }
-function saveConfig({ orchestratorUrl, token }) {
-  localStorage.setItem(LS_KEYS.orchestratorUrl, orchestratorUrl);
-  sessionStorage.setItem(SS_KEY, token);
+function saveConfig({ orchestratorUrl, token, authMode, clientId, clientSecret }) {
+  localStorage.setItem(LS_KEYS.orchestratorUrl, orchestratorUrl || '');
+  localStorage.setItem(LS_KEYS.authMode, authMode || 'pat');
+  if (clientId  !== undefined) localStorage.setItem(LS_KEYS.clientId, clientId);
+  sessionStorage.setItem(SS_KEY, token || '');
+  if (clientSecret !== undefined) sessionStorage.setItem(SS_KEY_SECRET, clientSecret || '');
 }
 
 // ─── API helpers — calls our Cloudflare Pages Function proxy ─────────────────
@@ -79,6 +103,30 @@ async function proxyFetch(cfg, action, extra = {}) {
 
 async function fetchSchedules(cfg)                       { return proxyFetch(cfg, 'schedules'); }
 async function fetchJobsForSchedule(cfg, releaseName)    { return proxyFetch(cfg, 'jobs', { releaseName }); }
+
+// Exchange OAuth2 client credentials for a bearer token via the proxy.
+// Returns the resolved token string (or the PAT if authMode is not 'app').
+async function resolveToken(cfg) {
+  if (cfg.authMode !== 'app' || !cfg.clientId || !cfg.clientSecret) {
+    return cfg.token || '';
+  }
+  const res = await fetch('/api/fetch-uipath', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action:         'getToken',
+      orchestratorUrl: cfg.orchestratorUrl,
+      clientId:        cfg.clientId,
+      clientSecret:    cfg.clientSecret,
+    }),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`Non-JSON response from proxy (HTTP ${res.status}): ${text.slice(0, 120)}`); }
+  if (!data.ok) throw new Error(data.error || 'Token exchange failed');
+  return data.value;
+}
 
 function medianDurationMs(jobs, fallbackMs = 5 * 60 * 1000) {
   const durations = jobs
@@ -933,6 +981,11 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
   const [local, setLocal] = useState(cfg);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
 
+  const isApp  = local.authMode === 'app';
+  const canSave = local.orchestratorUrl && (
+    isApp ? (local.clientId && local.clientSecret) : local.token
+  );
+
   function handleSave() {
     saveConfig(local);
     onSave(local);
@@ -955,18 +1008,59 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
             up to and including <strong style={{ color: 'var(--c-blue)' }}>/orchestrator_</strong>
           </div>
         </div>
+
+        {/* Auth mode toggle */}
         <div className="modal-field">
-          <TokenField value={local.token} onChange={v => set('token', v)} />
+          <div className="field-label">Authentication</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button className="btn-ghost"
+              style={{ flex: 1, justifyContent: 'center', background: !isApp ? 'var(--c-border)' : '' }}
+              onClick={() => set('authMode', 'pat')}>Bearer Token / PAT</button>
+            <button className="btn-ghost"
+              style={{ flex: 1, justifyContent: 'center', background: isApp ? 'var(--c-border)' : '' }}
+              onClick={() => set('authMode', 'app')}>App Credentials</button>
+          </div>
         </div>
-        <div className="field-hint">
-          URL saved to localStorage. Token in sessionStorage only — cleared on tab close.
-          All API calls go through the server-side proxy; your PAT never leaves this domain.
-        </div>
+
+        {!isApp ? (
+          <>
+            <div className="modal-field">
+              <TokenField value={local.token} onChange={v => set('token', v)} />
+            </div>
+            <div className="field-hint">
+              URL saved to localStorage. Token in sessionStorage only — cleared on tab close.
+              All API calls go through the server-side proxy; your PAT never leaves this domain.
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="modal-field">
+              <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+                Client ID
+                <HintIcon text="OAuth2 External Application Client ID from UiPath Automation Cloud." />
+              </div>
+              <input type="text" value={local.clientId || ''} onChange={e => set('clientId', e.target.value)}
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autoComplete="off" />
+            </div>
+            <div className="modal-field">
+              <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+                Client Secret
+                <HintIcon text="OAuth2 client secret generated when creating the External Application." />
+              </div>
+              <input type="password" value={local.clientSecret || ''} onChange={e => set('clientSecret', e.target.value)}
+                placeholder="Your client secret" autoComplete="new-password" />
+            </div>
+            <div className="field-hint">
+              Client ID saved to localStorage. Secret in sessionStorage only — cleared on tab close.
+              Credentials are exchanged server-side for a short-lived token; your secret never reaches the Orchestrator directly.
+            </div>
+          </>
+        )}
       </div>
       <div className="popover-footer">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn-primary" onClick={handleSave}
-          disabled={loading || !local.orchestratorUrl || !local.token}
+          disabled={loading || !canSave}
           style={{ flex: 1, justifyContent: 'center' }}>
           {loading ? 'Loading…' : 'Save & Fetch'}
         </button>
@@ -1161,10 +1255,14 @@ function App() {
       tags:     new Set((_urlP.get('ht') || '').split(',').filter(Boolean)),
     };
     try {
+      // Resolve actual bearer token (no-op for PAT mode, exchanges creds for App mode)
+      const token = await resolveToken(fetchCfg);
+      const activeCfg = { ...fetchCfg, token };
+
       // Step 1: discover all accessible folders
       let discoveredFolders = [];
       try {
-        discoveredFolders = await proxyFetch({ ...fetchCfg, folder: '' }, 'folders');
+        discoveredFolders = await proxyFetch({ ...activeCfg, folder: '' }, 'folders');
       } catch (e) {
         console.warn('[USV] Folder discovery failed, using root folder:', e.message);
         discoveredFolders = [{ Id: '', DisplayName: 'Default', FullyQualifiedName: 'Default' }];
@@ -1179,7 +1277,7 @@ function App() {
       const seenIds = new Set();
       await Promise.allSettled(discoveredFolders.map(async folder => {
         try {
-          const cfgF = { ...fetchCfg, folder: String(folder.Id) };
+          const cfgF = { ...activeCfg, folder: String(folder.Id) };
           const rows = await fetchSchedules(cfgF);
           for (const s of rows) {
             if (!seenIds.has(s.Id)) {
@@ -1196,7 +1294,7 @@ function App() {
       const machineMap = {}; // machineName → slotCount
       const releaseTagMap = {}; // releaseName → string[]
       await Promise.allSettled(discoveredFolders.map(async f => {
-        const cfgF = { ...fetchCfg, folder: String(f.Id) };
+        const cfgF = { ...activeCfg, folder: String(f.Id) };
         try {
           const machines = await proxyFetch(cfgF, 'machines');
           for (const m of machines) {
@@ -1238,7 +1336,7 @@ function App() {
               medianMs = cached.ms;
             } else {
               let jobs = [];
-              try { jobs = await fetchJobsForSchedule({ ...fetchCfg, folder: s._folderId }, s.ReleaseName || s.Name); }
+              try { jobs = await fetchJobsForSchedule({ ...activeCfg, folder: s._folderId }, s.ReleaseName || s.Name); }
               catch (e) { console.warn('[USV] Job history unavailable for', s.ReleaseName || s.Name, '—', e.message); }
               medianMs = medianDurationMs(jobs, fallbackMs);
               medianCache[s.Id] = { ms: medianMs, at: now };
@@ -1471,8 +1569,8 @@ function App() {
               background: open ? 'var(--c-border)' : '' }}>
             <span style={{
               width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-              background: cfg.token ? '#00C48C' : '#FA4616',
-              boxShadow: cfg.token ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
+              background: (cfg.authMode === 'app' ? (cfg.clientId && cfg.clientSecret) : cfg.token) ? '#00C48C' : '#FA4616',
+              boxShadow: (cfg.authMode === 'app' ? (cfg.clientId && cfg.clientSecret) : cfg.token) ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
             }} />
             Connection
           </button>

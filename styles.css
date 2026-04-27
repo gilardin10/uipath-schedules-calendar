@@ -809,3 +809,129 @@ select {
 [data-theme="light"] .hint-tooltip {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
 }
+
+/* ── Gantt / Resource Timeline view ──────────────────────────────────────── */
+.tl-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.tl-header {
+  display: flex;
+  align-items: stretch;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: 42px;
+}
+.tl-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.tl-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--c-border);
+  transition: background .1s;
+}
+.tl-row:hover { background: var(--c-glow); }
+.tl-row-label {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  /* Sticky horizontally so label stays while rows scroll */
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+.tl-machine-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--c-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-machine-meta {
+  font-size: 9px;
+  color: var(--c-muted);
+  margin-top: 2px;
+}
+.tl-row-strip {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+/* Hour grid lines inside the strip */
+.tl-hour-line {
+  position: absolute;
+  top: 0; bottom: 0;
+  border-left: 1px solid var(--c-border);
+  pointer-events: none;
+  z-index: 0;
+}
+.tl-day-line {
+  position: absolute;
+  top: 0; bottom: 0;
+  border-left: 2px solid var(--c-bh);
+  pointer-events: none;
+  z-index: 0;
+}
+/* Red "Now" vertical line */
+.tl-now-vline {
+  position: absolute;
+  top: 0; bottom: 0;
+  border-left: 2px solid #FA4616;
+  z-index: 4;
+  pointer-events: none;
+}
+.tl-now-dot {
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #FA4616;
+}
+/* Gantt event bar */
+.tl-bar {
+  position: absolute;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  padding: 0 5px;
+  overflow: hidden;
+  cursor: pointer;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  transition: filter .1s;
+}
+.tl-bar:hover { filter: brightness(1.2); z-index: 3; }
+.tl-bar-label {
+  font-size: 10px;
+  font-weight: 600;
+  font-family: 'Inter', system-ui, sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+/* Collision: pulsing red border */
+@keyframes pulse-collision {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(250,70,22,.5); }
+  50%       { box-shadow: 0 0 0 3px rgba(250,70,22,.15); }
+}
+.tl-collision {
+  border-color: #FA4616 !important;
+  animation: pulse-collision 1.4s ease-in-out infinite;
+}

@@ -15,14 +15,18 @@ function colorForIndex(i) { return PALETTE[i % PALETTE.length]; }
 // ─── localStorage / sessionStorage helpers ────────────────────────────────────
 const LS_KEYS = {
   orchestratorUrl: 'usp_orch_url',
-  theme:    'usp_theme',
-  uiTz:     'usp_ui_tz',
-  durMin:   'usp_dur_min',
-  authMode: 'usp_auth_mode',
-  clientId: 'usp_client_id',
+  theme:       'usp_theme',
+  uiTz:        'usp_ui_tz',
+  durMin:      'usp_dur_min',
+  authMode:    'usp_auth_mode',
+  clientId:    'usp_client_id',
+  pkceClientId:'usp_pkce_cid',
+  pkceOrg:     'usp_pkce_org',
+  pkceTenant:  'usp_pkce_tenant',
 };
-const SS_KEY        = 'usp_token';
-const SS_KEY_SECRET = 'usp_csecret';
+const SS_KEY              = 'usp_token';
+const SS_KEY_SECRET       = 'usp_csecret';
+const SS_KEY_PKCE_VERIFIER = 'usp_pkce_cv';
 
 // Median duration cache: { [scheduleId]: { ms, at } }
 const MEDIAN_CACHE_KEY = 'usp_medians';
@@ -35,16 +39,16 @@ function saveMedianCache(cache) {
 }
 
 function loadConfig() {
-  const stored   = localStorage.getItem(LS_KEYS.orchestratorUrl) || '';
-  const authMode = localStorage.getItem(LS_KEYS.authMode) || 'pat';
-  const clientId = localStorage.getItem(LS_KEYS.clientId) || '';
-  const clientSecret = sessionStorage.getItem(SS_KEY_SECRET) || '';
+  const stored       = localStorage.getItem(LS_KEYS.orchestratorUrl) || '';
+  const authMode     = localStorage.getItem(LS_KEYS.authMode)     || 'pat';
+  const clientId     = localStorage.getItem(LS_KEYS.clientId)     || '';
+  const clientSecret = sessionStorage.getItem(SS_KEY_SECRET)      || '';
+  const pkceClientId = localStorage.getItem(LS_KEYS.pkceClientId) || '';
+  const pkceOrg      = localStorage.getItem(LS_KEYS.pkceOrg)      || '';
+  const pkceTenant   = localStorage.getItem(LS_KEYS.pkceTenant)   || 'Default';
+  const token        = sessionStorage.getItem(SS_KEY)             || '';
   if (stored) {
-    return {
-      orchestratorUrl: stored,
-      token:  sessionStorage.getItem(SS_KEY) || '',
-      authMode, clientId, clientSecret,
-    };
+    return { orchestratorUrl: stored, token, authMode, clientId, clientSecret, pkceClientId, pkceOrg, pkceTenant };
   }
   // Migrate from old 3-field format
   const url    = localStorage.getItem('usp_url')    || '';
@@ -53,16 +57,18 @@ function loadConfig() {
   if (url && tenant) {
     return {
       orchestratorUrl: `${url.replace(/\/$/, '')}/${tenant}${prefix}`,
-      token: sessionStorage.getItem(SS_KEY) || '',
-      authMode, clientId, clientSecret,
+      token, authMode, clientId, clientSecret, pkceClientId, pkceOrg, pkceTenant,
     };
   }
-  return { orchestratorUrl: '', token: '', authMode: 'pat', clientId: '', clientSecret: '' };
+  return { orchestratorUrl: '', token: '', authMode: 'pat', clientId: '', clientSecret: '', pkceClientId: '', pkceOrg: '', pkceTenant: 'Default' };
 }
-function saveConfig({ orchestratorUrl, token, authMode, clientId, clientSecret }) {
+function saveConfig({ orchestratorUrl, token, authMode, clientId, clientSecret, pkceClientId, pkceOrg, pkceTenant }) {
   localStorage.setItem(LS_KEYS.orchestratorUrl, orchestratorUrl || '');
   localStorage.setItem(LS_KEYS.authMode, authMode || 'pat');
-  if (clientId  !== undefined) localStorage.setItem(LS_KEYS.clientId, clientId);
+  if (clientId     !== undefined) localStorage.setItem(LS_KEYS.clientId, clientId);
+  if (pkceClientId !== undefined) localStorage.setItem(LS_KEYS.pkceClientId, pkceClientId);
+  if (pkceOrg      !== undefined) localStorage.setItem(LS_KEYS.pkceOrg, pkceOrg);
+  if (pkceTenant   !== undefined) localStorage.setItem(LS_KEYS.pkceTenant, pkceTenant);
   sessionStorage.setItem(SS_KEY, token || '');
   if (clientSecret !== undefined) sessionStorage.setItem(SS_KEY_SECRET, clientSecret || '');
 }
@@ -125,6 +131,63 @@ async function resolveToken(cfg) {
   try { data = JSON.parse(text); }
   catch { throw new Error(`Non-JSON response from proxy (HTTP ${res.status}): ${text.slice(0, 120)}`); }
   if (!data.ok) throw new Error(data.error || 'Token exchange failed');
+  return data.value;
+}
+
+// ─── PKCE helpers ─────────────────────────────────────────────────────────────
+function genCodeVerifier() {
+  const arr = new Uint8Array(96);
+  crypto.getRandomValues(arr);
+  return btoa(String.fromCharCode(...arr)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+async function genCodeChallenge(verifier) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+async function startPkceFlow(clientId) {
+  const verifier  = genCodeVerifier();
+  const challenge = await genCodeChallenge(verifier);
+  sessionStorage.setItem(SS_KEY_PKCE_VERIFIER, verifier);
+  localStorage.setItem(LS_KEYS.pkceClientId, clientId);
+  const redirectUri = `${window.location.origin}${window.location.pathname}`;
+  const p = new URLSearchParams({
+    response_type:         'code',
+    client_id:             clientId,
+    scope:                 'openid OR.Default offline_access',
+    redirect_uri:          redirectUri,
+    code_challenge:        challenge,
+    code_challenge_method: 'S256',
+    state:                 'usp',
+  });
+  window.location.href = `https://cloud.uipath.com/identity_/connect/authorize?${p}`;
+}
+
+async function pkceExchangeCode(code, clientId, verifier) {
+  const redirectUri = `${window.location.origin}${window.location.pathname}`;
+  const res = await fetch('/api/fetch-uipath', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'pkceExchange', code, clientId, verifier, redirectUri }),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`Non-JSON response from proxy: ${text.slice(0, 120)}`); }
+  if (!data.ok) throw new Error(data.error || 'PKCE exchange failed');
+  return data.value;
+}
+
+async function listOrgsFromToken(token) {
+  const res = await fetch('/api/fetch-uipath', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'listOrgs' }),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`Non-JSON response from proxy: ${text.slice(0, 120)}`); }
+  if (!data.ok) throw new Error(data.error || 'Org listing failed');
   return data.value;
 }
 
@@ -359,6 +422,47 @@ function sameDay(a, b, tz) {
 function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function endOfMonth(d)   { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
 function addDays(d, n)   { return new Date(d.getTime() + n * 86400000); }
+
+// Returns 0-100 percentage position within a 24-hour day for a given timestamp
+function dayTimeToPct(d, tz) {
+  try {
+    const t = d.toLocaleTimeString('sv-SE', { timeZone: tz || undefined });
+    const [h, m, s] = t.split(':').map(Number);
+    return ((h * 3600 + m * 60 + (s || 0)) / 86400) * 100;
+  } catch (_) {
+    return ((d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) / 86400) * 100;
+  }
+}
+
+// Returns % for the "now" line if today == refDay, else null
+function nowDayPct(refDay, tz) {
+  const today = new Date();
+  if (!sameDay(today, refDay, tz)) return null;
+  return dayTimeToPct(today, tz);
+}
+
+// Greedy lane assignment for Gantt rows (same algorithm as column layout but horizontal)
+function computeTimelineLanes(events) {
+  if (!events.length) return [];
+  const sorted = [...events].sort((a, b) => a.occurrence.start - b.occurrence.start);
+  const laneEnds = [];
+  const assignments = sorted.map(ev => {
+    let lane = laneEnds.findIndex(end => ev.occurrence.start >= end);
+    if (lane === -1) lane = laneEnds.length;
+    laneEnds[lane] = ev.occurrence.end;
+    return lane;
+  });
+  // Per-event totalLanes = max lane among all overlapping events + 1
+  return sorted.map((ev, i) => {
+    const s = ev.occurrence.start.getTime(), e = ev.occurrence.end.getTime();
+    let maxLane = assignments[i];
+    for (let j = 0; j < sorted.length; j++) {
+      const os = sorted[j].occurrence.start.getTime(), oe = sorted[j].occurrence.end.getTime();
+      if (os < e && oe > s) maxLane = Math.max(maxLane, assignments[j]);
+    }
+    return { ev, lane: assignments[i], totalLanes: maxLane + 1 };
+  });
+}
 
 // ─── Collapsible sidebar section ─────────────────────────────────────────────
 function CollapsibleSection({ title, children, defaultOpen = true, badge }) {
@@ -778,6 +882,178 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave, uiTim
   );
 }
 
+// ─── Gantt / Resource Timeline view ──────────────────────────────────────────
+const LANE_H   = 32; // px per lane within a machine row
+const TL_LABEL = 148; // px width of the sticky machine-name column
+
+function CalendarTimeline({ days, eventsByDay, colorMap, uiTimezone, onHover, onLeave, machineTemplates }) {
+  const [nowPcts, setNowPcts] = useState(() => days.map(d => nowDayPct(d, uiTimezone)));
+
+  // Refresh now-line every minute
+  useEffect(() => {
+    const id = setInterval(
+      () => setNowPcts(days.map(d => nowDayPct(d, uiTimezone))),
+      60_000,
+    );
+    return () => clearInterval(id);
+  }, [days, uiTimezone]);
+
+  const N = days.length; // number of days visible (1 or 3)
+
+  // Group events by machine across all visible days, keeping track of day index
+  const byMachine = useMemo(() => {
+    const map = {};
+    days.forEach((date, di) => {
+      const key = dayKey(date, uiTimezone);
+      (eventsByDay[key] || []).forEach(ev => {
+        const m = ev.schedule.machine || 'Unassigned';
+        if (!map[m]) map[m] = [];
+        map[m].push({ ...ev, _di: di });
+      });
+    });
+    return map;
+  }, [days, eventsByDay, uiTimezone]);
+
+  const machineNames = Object.keys(byMachine).sort();
+
+  // Lane assignments per machine
+  const machineLayouts = useMemo(() => {
+    const r = {};
+    machineNames.forEach(m => { r[m] = computeTimelineLanes(byMachine[m]); });
+    return r;
+  }, [byMachine, machineNames]);
+
+  // Convert occurrence time to left% in the multi-day strip
+  function occToPct(occ, di) {
+    const timePct = dayTimeToPct(occ.start, uiTimezone); // 0-100 within that day
+    return (di * 100 + timePct) / N;
+  }
+  function durToPct(occ) {
+    const ms = occ.end - occ.start;
+    return Math.max((ms / (N * 86400000)) * 100, 0.3);
+  }
+
+  return (
+    <div className="tl-wrap">
+      {/* ── Timeline header: day labels + hour ticks ── */}
+      <div className="tl-header">
+        <div style={{ width: TL_LABEL, flexShrink: 0, borderRight: '1px solid var(--c-border)' }} />
+        <div style={{ flex: 1, position: 'relative', height: 38 }}>
+          {days.map((date, di) => {
+            const isToday = sameDay(date, new Date(), uiTimezone);
+            return (
+              <React.Fragment key={di}>
+                {/* Day label */}
+                <div style={{
+                  position: 'absolute',
+                  left: `${(di / N) * 100}%`,
+                  width: `${100 / N}%`,
+                  top: 0, height: 18,
+                  display: 'flex', alignItems: 'center', paddingLeft: 6,
+                  fontSize: 11, fontWeight: 700,
+                  color: isToday ? '#FA4616' : 'var(--c-muted)',
+                  borderLeft: di > 0 ? '1px solid var(--c-border)' : 'none',
+                }}>
+                  {date.toLocaleDateString('default', { weekday: 'short', month: 'short', day: 'numeric' })}
+                </div>
+                {/* Hour ticks for this day */}
+                {Array.from({ length: 24 }, (_, h) => (
+                  h % 3 === 0 ? (
+                    <div key={h} style={{
+                      position: 'absolute',
+                      left: `${(di / N + h / (N * 24)) * 100}%`,
+                      top: 20,
+                      transform: 'translateX(-50%)',
+                      fontSize: 9, color: 'var(--c-muted)',
+                      whiteSpace: 'nowrap', pointerEvents: 'none',
+                    }}>
+                      {String(h).padStart(2, '0')}
+                    </div>
+                  ) : null
+                ))}
+              </React.Fragment>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Machine rows ── */}
+      <div className="tl-body">
+        {machineNames.length === 0 && (
+          <div style={{ padding: '48px 24px', textAlign: 'center', color: 'var(--c-muted)', fontSize: 13 }}>
+            No scheduled events in this period
+          </div>
+        )}
+        {machineNames.map(machine => {
+          const laid       = machineLayouts[machine] || [];
+          const totalLanes = laid.length ? laid[0].totalLanes : 1;
+          const rowH       = Math.max(LANE_H, totalLanes * LANE_H);
+          const slotCount  = machineTemplates?.[machine] || 0;
+
+          return (
+            <div key={machine} className="tl-row" style={{ height: rowH }}>
+              {/* Sticky machine label */}
+              <div className="tl-row-label" style={{ width: TL_LABEL }}>
+                <div className="tl-machine-name">{machine}</div>
+                {slotCount > 1 && (
+                  <div className="tl-machine-meta">Template · {slotCount} slots</div>
+                )}
+              </div>
+
+              {/* Timeline strip */}
+              <div className="tl-row-strip">
+                {/* Hour grid lines */}
+                {Array.from({ length: N * 24 + 1 }, (_, i) => (
+                  <div key={i} className={i % 24 === 0 ? 'tl-day-line' : 'tl-hour-line'}
+                    style={{ left: `${(i / (N * 24)) * 100}%` }} />
+                ))}
+
+                {/* "Now" vertical lines */}
+                {days.map((_, di) => nowPcts[di] !== null && (
+                  <div key={di} className="tl-now-vline"
+                    style={{ left: `${(di / N + nowPcts[di] / (N * 100)) * 100}%` }}>
+                    <div className="tl-now-dot" />
+                  </div>
+                ))}
+
+                {/* Event bars */}
+                {laid.map(({ ev, lane, totalLanes: tl }, i) => {
+                  const laneH    = rowH / tl;
+                  const leftPct  = occToPct(ev.occurrence, ev._di);
+                  const wPct     = durToPct(ev.occurrence);
+                  const color    = colorMap[ev.schedule.id] || 'var(--c-muted)';
+                  const isCollide = tl > 1;
+                  return (
+                    <div key={i}
+                      className={`tl-bar${isCollide ? ' tl-collision' : ''}`}
+                      style={{
+                        left: `${leftPct}%`,
+                        width: `${wPct}%`,
+                        top: lane * laneH + 2,
+                        height: laneH - 4,
+                        background: color + '28',
+                        borderColor: isCollide ? '#FA4616' : color,
+                        color,
+                      }}
+                      onMouseEnter={e => onHover(ev, { x: e.clientX, y: e.clientY })}
+                      onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
+                      onMouseLeave={onLeave}>
+                      <span className="tl-bar-label">
+                        {ev.gapWarning && <span className="gap-warn-icon">⚠</span>}
+                        {fmtTime(ev.occurrence.start, uiTimezone)} {ev.schedule.name}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Sidebar multi-select filter ──────────────────────────────────────────────
 function FilterList({ label, items, selected, onToggle, colorMap }) {
   const [search, setSearch] = useState('');
@@ -979,11 +1255,17 @@ function Popover({ trigger, children, align = 'left' }) {
 // ─── Connection popover ───────────────────────────────────────────────────────
 function ConnectionPopover({ cfg, onSave, loading, onClose }) {
   const [local, setLocal] = useState(cfg);
+  const [pkceStarting, setPkceStarting] = useState(false);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
 
+  const isPat  = local.authMode === 'pat'  || !local.authMode;
   const isApp  = local.authMode === 'app';
+  const isPkce = local.authMode === 'pkce';
+
   const canSave = local.orchestratorUrl && (
-    isApp ? (local.clientId && local.clientSecret) : local.token
+    isApp  ? (local.clientId && local.clientSecret) :
+    isPkce ? local.token :
+    local.token
   );
 
   function handleSave() {
@@ -992,79 +1274,135 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
     onClose();
   }
 
+  async function handlePkceConnect() {
+    if (!local.pkceClientId) return;
+    setPkceStarting(true);
+    saveConfig({ ...local, authMode: 'pkce' }); // persist clientId before redirect
+    try { await startPkceFlow(local.pkceClientId); }
+    catch (e) { setPkceStarting(false); }
+  }
+
+  const modeBtn = (mode, label) => (
+    <button className="btn-ghost"
+      style={{ flex: 1, justifyContent: 'center', background: local.authMode === mode ? 'var(--c-border)' : '' }}
+      onClick={() => set('authMode', mode)}>{label}</button>
+  );
+
   return (
     <>
       <div className="popover-header">Connection</div>
       <div className="popover-body">
+
+        {/* Auth mode tabs */}
         <div className="modal-field">
-          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
-            Orchestrator URL
-            <HintIcon text="Full URL to your Cloud Orchestrator, including org, tenant, and API prefix. Copy it from the browser address bar when inside Orchestrator." />
-          </div>
-          <input type="text" value={local.orchestratorUrl} onChange={e => set('orchestratorUrl', e.target.value)}
-            placeholder="https://cloud.uipath.com/org/tenant/orchestrator_" />
-          <div className="field-hint">
-            Copy the URL from your browser while on the Orchestrator page,
-            up to and including <strong style={{ color: 'var(--c-blue)' }}>/orchestrator_</strong>
+          <div className="field-label">Authentication Method</div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {modeBtn('pat',  'PAT')}
+            {modeBtn('app',  'App Credentials')}
+            {modeBtn('pkce', 'UiPath OAuth')}
           </div>
         </div>
 
-        {/* Auth mode toggle */}
-        <div className="modal-field">
-          <div className="field-label">Authentication</div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button className="btn-ghost"
-              style={{ flex: 1, justifyContent: 'center', background: !isApp ? 'var(--c-border)' : '' }}
-              onClick={() => set('authMode', 'pat')}>Bearer Token / PAT</button>
-            <button className="btn-ghost"
-              style={{ flex: 1, justifyContent: 'center', background: isApp ? 'var(--c-border)' : '' }}
-              onClick={() => set('authMode', 'app')}>App Credentials</button>
-          </div>
-        </div>
-
-        {!isApp ? (
-          <>
-            <div className="modal-field">
-              <TokenField value={local.token} onChange={v => set('token', v)} />
-            </div>
-            <div className="field-hint">
-              URL saved to localStorage. Token in sessionStorage only — cleared on tab close.
-              All API calls go through the server-side proxy; your PAT never leaves this domain.
-            </div>
-          </>
-        ) : (
+        {/* PAT mode */}
+        {isPat && (
           <>
             <div className="modal-field">
               <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
-                Client ID
-                <HintIcon text="OAuth2 External Application Client ID from UiPath Automation Cloud." />
+                Orchestrator URL
+                <HintIcon text="Full URL including org, tenant, and API prefix e.g. https://cloud.uipath.com/org/tenant/orchestrator_" />
+              </div>
+              <input type="text" value={local.orchestratorUrl} onChange={e => set('orchestratorUrl', e.target.value)}
+                placeholder="https://cloud.uipath.com/org/tenant/orchestrator_" />
+              <div className="field-hint">Copy from your browser address bar up to <strong style={{ color: 'var(--c-blue)' }}>/orchestrator_</strong></div>
+            </div>
+            <div className="modal-field">
+              <TokenField value={local.token} onChange={v => set('token', v)} />
+            </div>
+            <div className="field-hint">Token stored in sessionStorage only — cleared on tab close.</div>
+          </>
+        )}
+
+        {/* App Credentials mode */}
+        {isApp && (
+          <>
+            <div className="modal-field">
+              <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+                Orchestrator URL
+                <HintIcon text="Full URL including org, tenant, and API prefix." />
+              </div>
+              <input type="text" value={local.orchestratorUrl} onChange={e => set('orchestratorUrl', e.target.value)}
+                placeholder="https://cloud.uipath.com/org/tenant/orchestrator_" />
+            </div>
+            <div className="modal-field">
+              <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+                Client ID <HintIcon text="OAuth2 External Application Client ID from UiPath Automation Cloud." />
               </div>
               <input type="text" value={local.clientId || ''} onChange={e => set('clientId', e.target.value)}
                 placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autoComplete="off" />
             </div>
             <div className="modal-field">
               <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
-                Client Secret
-                <HintIcon text="OAuth2 client secret generated when creating the External Application." />
+                Client Secret <HintIcon text="OAuth2 client secret from the External Application." />
               </div>
               <input type="password" value={local.clientSecret || ''} onChange={e => set('clientSecret', e.target.value)}
                 placeholder="Your client secret" autoComplete="new-password" />
             </div>
-            <div className="field-hint">
-              Client ID saved to localStorage. Secret in sessionStorage only — cleared on tab close.
-              Credentials are exchanged server-side for a short-lived token; your secret never reaches the Orchestrator directly.
-            </div>
+            <div className="field-hint">Client ID in localStorage; secret in sessionStorage only.</div>
           </>
         )}
+
+        {/* PKCE mode */}
+        {isPkce && (
+          <>
+            {cfg.token ? (
+              <div style={{ padding: '8px 10px', background: 'rgba(0,196,140,.08)',
+                border: '1px solid rgba(0,196,140,.25)', borderRadius: 6, fontSize: 12, color: '#00C48C' }}>
+                ✓ Authorized via UiPath OAuth
+                {cfg.pkceOrg && <span style={{ color: 'var(--c-muted)', marginLeft: 8 }}>{cfg.pkceOrg}/{cfg.pkceTenant}</span>}
+              </div>
+            ) : (
+              <div className="field-hint" style={{ color: '#FFB800' }}>
+                ⚠ Not yet authorized — enter your Client ID and click Authorize.
+              </div>
+            )}
+            <div className="modal-field">
+              <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+                Client ID <HintIcon text="External Application Client ID registered at UiPath Automation Cloud (no secret needed for PKCE)." />
+              </div>
+              <input type="text" value={local.pkceClientId || ''} onChange={e => set('pkceClientId', e.target.value)}
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autoComplete="off" />
+            </div>
+            <div className="field-hint">
+              You will be redirected to UiPath to sign in. No secret is needed — PKCE uses only the Client ID.
+            </div>
+            <button className="btn-primary" style={{ width: '100%', justifyContent: 'center', marginTop: 4 }}
+              onClick={handlePkceConnect}
+              disabled={pkceStarting || !local.pkceClientId}>
+              {pkceStarting ? 'Redirecting…' : '↗ Authorize with UiPath'}
+            </button>
+          </>
+        )}
+
       </div>
-      <div className="popover-footer">
-        <button className="btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" onClick={handleSave}
-          disabled={loading || !canSave}
-          style={{ flex: 1, justifyContent: 'center' }}>
-          {loading ? 'Loading…' : 'Save & Fetch'}
-        </button>
-      </div>
+      {!isPkce && (
+        <div className="popover-footer">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={handleSave}
+            disabled={loading || !canSave}
+            style={{ flex: 1, justifyContent: 'center' }}>
+            {loading ? 'Loading…' : 'Save & Fetch'}
+          </button>
+        </div>
+      )}
+      {isPkce && cfg.token && (
+        <div className="popover-footer">
+          <button className="btn-ghost" onClick={onClose}>Close</button>
+          <button className="btn-primary" onClick={() => { onSave(local); onClose(); }}
+            style={{ flex: 1, justifyContent: 'center' }}>
+            Reload Schedules
+          </button>
+        </div>
+      )}
     </>
   );
 }
@@ -1183,8 +1521,14 @@ function App() {
   const [eventsByDay, setEventsByDay] = useState({});
   const [calView,     setCalView]     = useState(() => {
     const v = new URLSearchParams(window.location.search).get('view');
-    return ['month','week','3day','day'].includes(v) ? v : 'month';
+    return ['month','week','3day','day','timeline'].includes(v) ? v : 'month';
   });
+  // PKCE callback state
+  const [pkceStatus,      setPkceStatus]      = useState(null); // null | 'exchanging' | 'select-org' | 'error'
+  const [pkceOrgs,        setPkceOrgs]        = useState([]);
+  const [pkceSelOrg,      setPkceSelOrg]      = useState('');
+  const [pkceSelTenant,   setPkceSelTenant]   = useState('Default');
+  const [pkceError,       setPkceError]       = useState('');
   const calViewRef = useRef('month');
   useEffect(() => { calViewRef.current = calView; }, [calView]);
   // Holds URL filter state captured at the start of each handleFetch call
@@ -1238,6 +1582,39 @@ function App() {
     const hidden = pendingHiddenFiltersRef.current.tags;
     setSelectedTags(new Set(allTags.filter(t => !hidden.has(t))));
   }, [allTags]);
+
+  // ── PKCE OAuth callback: detect ?code= on page load ──────────────────────
+  useEffect(() => {
+    const params   = new URLSearchParams(window.location.search);
+    const code     = params.get('code');
+    const state    = params.get('state');
+    if (!code || state !== 'usp') return;
+
+    const verifier = sessionStorage.getItem(SS_KEY_PKCE_VERIFIER);
+    const cid      = localStorage.getItem(LS_KEYS.pkceClientId) || '';
+    // Clean URL immediately so reloads don't re-trigger
+    window.history.replaceState({}, '', window.location.pathname);
+    sessionStorage.removeItem(SS_KEY_PKCE_VERIFIER);
+    if (!verifier || !cid) return;
+
+    setPkceStatus('exchanging');
+    setPkceError('');
+
+    pkceExchangeCode(code, cid, verifier)
+      .then(token => {
+        sessionStorage.setItem(SS_KEY, token);
+        setCfg(c => ({ ...c, token, authMode: 'pkce', pkceClientId: cid }));
+        return listOrgsFromToken(token).then(orgs => {
+          setPkceOrgs(orgs);
+          if (orgs.length === 1) setPkceSelOrg(orgs[0].accountName || '');
+          setPkceStatus('select-org');
+        });
+      })
+      .catch(err => {
+        setPkceError(err.message || String(err));
+        setPkceStatus('error');
+      });
+  }, []); // run once on mount
 
   // ── Fetch schedules + median durations ──────────────────────────────────────
   const handleFetch = useCallback(async (fetchCfg, forceRefresh = false) => {
@@ -1375,7 +1752,7 @@ function App() {
         const d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
         d.setDate(d.getDate() - d.getDay());
         setAnchorDate(d);
-      } else if (cv === 'day' || cv === '3day') {
+      } else if (cv === 'day' || cv === '3day' || cv === 'timeline') {
         setAnchorDate(new Date(t.getFullYear(), t.getMonth(), t.getDate()));
       } else {
         setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
@@ -1476,8 +1853,8 @@ function App() {
   function navigate(dir) {
     setAnchorDate(a => {
       if (calView === 'month') return new Date(a.getFullYear(), a.getMonth() + dir, 1);
-      const days = calView === 'week' ? 7 : calView === '3day' ? 3 : 1;
-      return addDays(a, days * dir);
+      const n = calView === 'week' ? 7 : calView === '3day' ? 3 : 1;
+      return addDays(a, n * dir);
     });
   }
   function goToday() {
@@ -1493,10 +1870,10 @@ function App() {
     }
   }
 
-  // ── Derive days array for time-grid views ─────────────────────────────────────
+  // ── Derive days array for time-grid and timeline views ───────────────────────
   const viewDays = useMemo(() => {
     if (calView === 'month') return [];
-    const count = calView === 'week' ? 7 : calView === '3day' ? 3 : 1;
+    const count = calView === 'week' ? 7 : calView === '3day' ? 3 : 1; // timeline + day both = 1
     return Array.from({ length: count }, (_, i) => addDays(anchorDate, i));
   }, [calView, anchorDate]);
 
@@ -1505,7 +1882,7 @@ function App() {
     if (calView === 'month') {
       return anchorDate.toLocaleString('default', { month: 'long', year: 'numeric' });
     }
-    if (calView === 'day') {
+    if (calView === 'day' || calView === 'timeline') {
       return anchorDate.toLocaleDateString('default', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
     }
     const first = viewDays[0], last = viewDays[viewDays.length - 1];
@@ -1567,11 +1944,18 @@ function App() {
           <button className="btn-ghost" onClick={toggle}
             style={{ display: 'flex', alignItems: 'center', gap: 6,
               background: open ? 'var(--c-border)' : '' }}>
-            <span style={{
-              width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-              background: (cfg.authMode === 'app' ? (cfg.clientId && cfg.clientSecret) : cfg.token) ? '#00C48C' : '#FA4616',
-              boxShadow: (cfg.authMode === 'app' ? (cfg.clientId && cfg.clientSecret) : cfg.token) ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
-            }} />
+            {(() => {
+              const ok = cfg.authMode === 'app'
+                ? !!(cfg.clientId && cfg.clientSecret)
+                : !!cfg.token;
+              return (
+                <span style={{
+                  width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                  background: ok ? '#00C48C' : '#FA4616',
+                  boxShadow: ok ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
+                }} />
+              );
+            })()}
             Connection
           </button>
         )}>
@@ -1604,10 +1988,11 @@ function App() {
         {/* View switcher */}
         <div className="view-switcher">
           {[
-            { key: 'month', label: 'Month' },
-            { key: 'week',  label: 'Week'  },
-            { key: '3day',  label: '3 Day' },
-            { key: 'day',   label: 'Day'   },
+            { key: 'month',    label: 'Month'    },
+            { key: 'week',     label: 'Week'     },
+            { key: '3day',     label: '3 Day'    },
+            { key: 'day',      label: 'Day'      },
+            { key: 'timeline', label: 'Timeline' },
           ].map(v => (
             <button key={v.key}
               className={`view-btn${calView === v.key ? ' active' : ''}`}
@@ -1728,29 +2113,20 @@ function App() {
         <main style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
 
           {/* Empty state */}
-          {!loading && !error && schedules.length === 0 && (
+          {!loading && !error && schedules.length === 0 && pkceStatus !== 'exchanging' && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 16, color: 'var(--c-muted)' }}>
               {!cfg.token ? (
-                // ── No token at all ──────────────────────────────────────────
-                <>
-                  <div style={{ padding: '20px 24px', background: 'rgba(250,70,22,.08)',
-                    border: '1px solid rgba(250,70,22,.3)', borderRadius: 10, maxWidth: 400, textAlign: 'center' }}>
-                    <div style={{ fontSize: 28, marginBottom: 8 }}>🔑</div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: '#FA4616', marginBottom: 8 }}>
-                      Personal Access Token required
-                    </div>
-                    <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--c-text)' }}>
-                      Click the <strong>Connection</strong> button in the header, enter your
-                      Orchestrator URL and PAT, then click{' '}
-                      <strong>Save &amp; Fetch Schedules</strong>.
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--c-muted)', marginTop: 10 }}>
-                      Generate a PAT: UiPath Cloud → My Profile → Personal Access Tokens → + New
-                    </div>
+                <div style={{ padding: '20px 24px', background: 'rgba(250,70,22,.08)',
+                  border: '1px solid rgba(250,70,22,.3)', borderRadius: 10, maxWidth: 420, textAlign: 'center' }}>
+                  <div style={{ fontSize: 28, marginBottom: 8 }}>🔒</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: '#FA4616', marginBottom: 8 }}>Not connected</div>
+                  <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--c-text)' }}>
+                    Click <strong>Connection</strong> in the header to authenticate with UiPath.
+                    Supports PAT, App Credentials (client_credentials), or{' '}
+                    <strong>UiPath OAuth (PKCE)</strong> for browser-based sign-in.
                   </div>
-                </>
+                </div>
               ) : (
-                // ── Token present, no data yet ───────────────────────────────
                 <>
                   <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--c-border)" strokeWidth="1.5">
                     <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
@@ -1759,19 +2135,19 @@ function App() {
                     <line x1="3"  y1="10" x2="21" y2="10"/>
                   </svg>
                   <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6, color: 'var(--c-text)' }}>
-                      No schedules loaded
-                    </div>
-                    <div style={{ fontSize: 13 }}>
-                      Click the <strong>Connection</strong> button in the header, then click{' '}
-                      <strong>Save &amp; Fetch Schedules</strong>.
-                    </div>
-                    <div style={{ marginTop: 8, fontSize: 12, color: '#00C48C' }}>
-                      ✓ Token is set
-                    </div>
+                    <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6, color: 'var(--c-text)' }}>No schedules loaded</div>
+                    <div style={{ fontSize: 13 }}>Click <strong>Connection</strong> → <strong>Save &amp; Fetch</strong>.</div>
+                    <div style={{ marginTop: 8, fontSize: 12, color: '#00C48C' }}>✓ Token configured</div>
                   </div>
                 </>
               )}
+            </div>
+          )}
+          {/* PKCE exchanging indicator */}
+          {pkceStatus === 'exchanging' && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', gap: 14 }}>
+              <div className="skeleton" style={{ width: 48, height: 48, borderRadius: '50%' }} />
+              <div style={{ fontSize: 14, color: 'var(--c-muted)' }}>Exchanging authorization code…</div>
             </div>
           )}
 
@@ -1814,9 +2190,22 @@ function App() {
               uiTimezone={uiTimezone}
             />
           )}
-          {!showSkeleton && schedules.length > 0 && calView !== 'month' && (
+          {!showSkeleton && schedules.length > 0 && calView !== 'month' && calView !== 'timeline' && (
             <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 160px)', minHeight: 400 }}>
               <CalendarTimeGrid
+                days={viewDays}
+                eventsByDay={eventsByDay}
+                colorMap={colorMap}
+                onHover={handleHover}
+                onLeave={handleLeave}
+                uiTimezone={uiTimezone}
+                machineTemplates={machineTemplates}
+              />
+            </div>
+          )}
+          {!showSkeleton && schedules.length > 0 && calView === 'timeline' && (
+            <div style={{ height: 'calc(100vh - 160px)', minHeight: 400, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <CalendarTimeline
                 days={viewDays}
                 eventsByDay={eventsByDay}
                 colorMap={colorMap}
@@ -1835,6 +2224,95 @@ function App() {
 
       {/* Toast portal – fixed top-right */}
       <Toast error={error} onClose={() => setError(null)} />
+
+      {/* ── PKCE org / tenant selection overlay ── */}
+      {pkceStatus === 'select-org' && (
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(4,14,25,.88)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 9999,
+        }}>
+          <div style={{
+            background: '#162536',
+            border: '1px solid var(--c-border)',
+            borderRadius: 12,
+            padding: '28px 32px',
+            width: 400,
+            boxShadow: '0 4px 12px rgba(0,0,0,.5), 0 20px 60px rgba(0,0,0,.4)',
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--c-text)', marginBottom: 4 }}>
+              Select Orchestrator
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--c-muted)', marginBottom: 20 }}>
+              Choose the organization and tenant to connect to.
+            </div>
+
+            <div className="modal-field" style={{ marginBottom: 12 }}>
+              <div className="field-label">Organization</div>
+              {pkceOrgs.length > 0 ? (
+                <select value={pkceSelOrg} onChange={e => setPkceSelOrg(e.target.value)} style={{ fontSize: 13 }}>
+                  <option value="">— select —</option>
+                  {pkceOrgs.map(o => (
+                    <option key={o.accountName} value={o.accountName}>
+                      {o.accountDisplayName || o.accountName}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input type="text" value={pkceSelOrg} onChange={e => setPkceSelOrg(e.target.value)}
+                  placeholder="your-org-name" />
+              )}
+            </div>
+
+            <div className="modal-field" style={{ marginBottom: 20 }}>
+              <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+                Tenant
+                <HintIcon text="UiPath Cloud tenant name. 'Default' is the most common value." />
+              </div>
+              <input type="text" value={pkceSelTenant} onChange={e => setPkceSelTenant(e.target.value)}
+                placeholder="Default" />
+            </div>
+
+            <button className="btn-primary" style={{ width: '100%', justifyContent: 'center' }}
+              disabled={!pkceSelOrg || !pkceSelTenant}
+              onClick={() => {
+                const token = sessionStorage.getItem(SS_KEY) || cfg.token;
+                const cid   = localStorage.getItem(LS_KEYS.pkceClientId) || cfg.pkceClientId;
+                const builtUrl = `https://cloud.uipath.com/${pkceSelOrg}/${pkceSelTenant}/orchestrator_`;
+                const newCfg = { ...cfg, orchestratorUrl: builtUrl, token, authMode: 'pkce',
+                  pkceClientId: cid, pkceOrg: pkceSelOrg, pkceTenant: pkceSelTenant };
+                saveConfig(newCfg);
+                setCfg(newCfg);
+                setPkceStatus(null);
+                handleFetch(newCfg);
+              }}>
+              Load Schedules
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* PKCE error overlay */}
+      {pkceStatus === 'error' && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(4,14,25,.88)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+        }}>
+          <div style={{
+            background: '#162536', border: '1px solid rgba(250,70,22,.4)',
+            borderRadius: 12, padding: '28px 32px', width: 380,
+            boxShadow: '0 4px 12px rgba(0,0,0,.5)',
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#FA4616', marginBottom: 8 }}>OAuth Error</div>
+            <div style={{ fontSize: 12, color: 'var(--c-text)', marginBottom: 20, lineHeight: 1.6 }}>{pkceError}</div>
+            <button className="btn-ghost" onClick={() => setPkceStatus(null)} style={{ width: '100%', justifyContent: 'center' }}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
     </div>
   );

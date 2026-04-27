@@ -3,18 +3,14 @@
  *
  * Route: POST /api/fetch-uipath
  *
- * Request body (JSON):
- *   action          "schedules" | "jobs" | "folders" | "machines" | "releaseTags" | "getToken"
- *   orchestratorUrl Full Orchestrator base URL including tenant + API prefix, e.g.
- *                   "https://cloud.uipath.com/org/Default/orchestrator_"
- *   folder          Folder / Org-Unit ID (optional header value)
- *   releaseName     Required only when action === "jobs"
- *   clientId        Required only when action === "getToken"
- *   clientSecret    Required only when action === "getToken"
+ * Actions (sent in JSON body):
+ *   pkceExchange  Exchange PKCE auth code for access token (no prior token needed)
+ *   getToken      Exchange client_credentials for bearer token (no prior token needed)
+ *   listOrgs      List UiPath Cloud organizations (needs Authorization header)
+ *   schedules | jobs | folders | machines | releaseTags
+ *                 Standard Orchestrator OData calls (needs Authorization header + orchestratorUrl)
  *
- * Response (JSON):
- *   { ok: true,  value: [...] }   (or { ok: true, value: "<access_token>" } for getToken)
- *   { ok: false, error: "...", status: 4xx }
+ * Security: tokens are never logged.
  */
 
 const CORS = {
@@ -35,26 +31,56 @@ export async function onRequestOptions() {
 }
 
 export async function onRequestPost({ request }) {
-  // ── 1. Parse body first (getToken does not need a PAT) ───────────────────────
+  // ── 1. Parse body first — some actions need no prior token ────────────────
   let body;
   try { body = await request.json(); }
   catch { return json({ ok: false, error: 'Request body must be valid JSON' }, 400); }
 
-  const { action, orchestratorUrl, folder, releaseName, clientId, clientSecret } = body;
+  const {
+    action, orchestratorUrl, folder, releaseName,
+    clientId, clientSecret, code, verifier, redirectUri,
+  } = body;
 
-  if (!action) {
-    return json({ ok: false, error: 'Missing required field: action' }, 400);
+  if (!action) return json({ ok: false, error: 'Missing required field: action' }, 400);
+
+  // ── 2. PKCE authorization-code exchange (no prior token required) ─────────
+  if (action === 'pkceExchange') {
+    if (!code || !verifier || !clientId || !redirectUri) {
+      return json({ ok: false, error: 'pkceExchange requires code, verifier, clientId, redirectUri' }, 400);
+    }
+    let tokenRes;
+    try {
+      tokenRes = await fetch('https://cloud.uipath.com/identity_/connect/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type:    'authorization_code',
+          client_id:     clientId,
+          code,
+          redirect_uri:  redirectUri,
+          code_verifier: verifier,
+        }).toString(),
+      });
+    } catch (err) {
+      return json({ ok: false, error: `Network error reaching identity server: ${err.message}` }, 502);
+    }
+    if (!tokenRes.ok) {
+      let detail = '';
+      try { const t = await tokenRes.text(); detail = t ? ` — ${t.slice(0, 300)}` : ''; } catch (_) {}
+      return json({ ok: false, error: `Token endpoint returned HTTP ${tokenRes.status}${detail}` });
+    }
+    let td;
+    try { td = await tokenRes.json(); }
+    catch { return json({ ok: false, error: 'Identity server returned a non-JSON response' }, 502); }
+    if (!td.access_token) return json({ ok: false, error: 'No access_token in identity server response' }, 502);
+    return json({ ok: true, value: td.access_token });
   }
 
-  // ── 2. getToken: exchange OAuth2 client credentials for a bearer token ───────
+  // ── 3. getToken: OAuth2 client_credentials (no prior token required) ──────
   if (action === 'getToken') {
     if (!orchestratorUrl || !clientId || !clientSecret) {
       return json({ ok: false, error: 'getToken requires orchestratorUrl, clientId, clientSecret' }, 400);
     }
-
-    // Derive identity server URL from the Orchestrator URL
-    // Cloud: *.uipath.com → https://account.uipath.com/oauth/token
-    // On-prem: https://my-server/... → https://my-server/identity/connect/token
     let tokenUrl;
     try {
       const parsed = new URL(orchestratorUrl);
@@ -64,57 +90,60 @@ export async function onRequestPost({ request }) {
     } catch {
       return json({ ok: false, error: 'Invalid orchestratorUrl' }, 400);
     }
-
-    const formBody = new URLSearchParams({
-      grant_type:    'client_credentials',
-      client_id:     clientId,
-      client_secret: clientSecret,
-    });
-    // UiPath Cloud requires scope; on-prem identity servers accept it but don't require it
-    if (orchestratorUrl.includes('uipath.com')) {
-      formBody.set('scope', 'OR.Default');
-    }
-
+    const formBody = new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret });
+    if (orchestratorUrl.includes('uipath.com')) formBody.set('scope', 'OR.Default');
     let tokenRes;
     try {
       tokenRes = await fetch(tokenUrl, {
-        method:  'POST',
+        method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body:    formBody.toString(),
+        body: formBody.toString(),
       });
     } catch (err) {
       return json({ ok: false, error: `Network error reaching identity server: ${err.message}` }, 502);
     }
-
     if (!tokenRes.ok) {
       let detail = '';
       try { const t = await tokenRes.text(); detail = t ? ` — ${t.slice(0, 300)}` : ''; } catch (_) {}
       return json({ ok: false, error: `Token endpoint returned HTTP ${tokenRes.status}${detail}` });
     }
-
-    let tokenData;
-    try { tokenData = await tokenRes.json(); }
+    let td;
+    try { td = await tokenRes.json(); }
     catch { return json({ ok: false, error: 'Identity server returned a non-JSON response' }, 502); }
-
-    if (!tokenData.access_token) {
-      return json({ ok: false, error: 'No access_token in identity server response' }, 502);
-    }
-
-    return json({ ok: true, value: tokenData.access_token });
+    if (!td.access_token) return json({ ok: false, error: 'No access_token in identity server response' }, 502);
+    return json({ ok: true, value: td.access_token });
   }
 
-  // ── 3. All other actions require a PAT in the Authorization header ───────────
+  // ── 4. All remaining actions require a valid Authorization header ─────────
   const authHeader = request.headers.get('Authorization') || '';
   const pat = authHeader.replace(/^Bearer\s+/i, '').trim();
   if (!pat) return json({ ok: false, error: 'Missing Authorization header' }, 401);
 
+  // ── 5. listOrgs: UiPath Cloud account/org discovery ───────────────────────
+  if (action === 'listOrgs') {
+    let res;
+    try {
+      res = await fetch('https://cloud.uipath.com/api/account', {
+        headers: { 'Authorization': `Bearer ${pat}` },
+      });
+    } catch (err) {
+      return json({ ok: false, error: `Network error: ${err.message}` }, 502);
+    }
+    if (!res.ok) {
+      let detail = '';
+      try { const t = await res.text(); detail = t ? ` — ${t.slice(0, 200)}` : ''; } catch (_) {}
+      return json({ ok: false, error: `Accounts API returned HTTP ${res.status}${detail}` });
+    }
+    let data;
+    try { data = await res.json(); }
+    catch { return json({ ok: false, error: 'Accounts API returned a non-JSON response' }, 502); }
+    return json({ ok: true, value: data.accounts || data.value || [] });
+  }
+
+  // ── 6. OData actions require orchestratorUrl ──────────────────────────────
   if (!orchestratorUrl) {
     return json({ ok: false, error: 'Missing required field: orchestratorUrl' }, 400);
   }
-
-  // ── 4. Build upstream URL ─────────────────────────────────────────────────────
-  // orchestratorUrl already includes org/tenant/prefix, e.g.
-  // https://cloud.uipath.com/myorg/Default/orchestrator_
   const base = orchestratorUrl.replace(/\/$/, '');
 
   let odataPath, odataParams;
@@ -144,32 +173,20 @@ export async function onRequestPost({ request }) {
     };
   } else if (action === 'machines') {
     odataPath   = '/odata/Machines';
-    odataParams = {
-      '$select': 'Id,Name,Type,NonProductionSlots',
-      '$top':    '200',
-    };
+    odataParams = { '$select': 'Id,Name,Type,NonProductionSlots', '$top': '200' };
   } else if (action === 'releaseTags') {
     odataPath   = '/odata/Releases';
-    odataParams = {
-      '$select': 'Id,Name,Tags',
-      '$top':    '500',
-    };
+    odataParams = { '$select': 'Id,Name,Tags', '$top': '500' };
   } else {
     return json({ ok: false, error: `Unknown action: ${action}` }, 400);
   }
 
-  // OData query strings must NOT encode '$' — URLSearchParams would break them
   const qs = Object.entries(odataParams)
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join('&');
-
   const upstreamUrl = `${base}${odataPath}?${qs}`;
 
-  // ── 5. Call Orchestrator ──────────────────────────────────────────────────────
-  const upstreamHeaders = {
-    'Authorization': `Bearer ${pat}`,
-    'Content-Type':  'application/json',
-  };
+  const upstreamHeaders = { 'Authorization': `Bearer ${pat}`, 'Content-Type': 'application/json' };
   if (folder && action !== 'folders') upstreamHeaders['X-UIPATH-OrganizationUnitId'] = String(folder);
 
   let upstreamRes;
@@ -179,30 +196,20 @@ export async function onRequestPost({ request }) {
     return json({ ok: false, error: `Network error reaching Orchestrator: ${err.message}` }, 502);
   }
 
-  // ── 6. Map upstream errors ────────────────────────────────────────────────────
-  // Always return HTTP 200 from our function so Cloudflare's edge never strips
-  // the response body. The real Orchestrator status is embedded in the JSON.
   if (!upstreamRes.ok) {
     const { status } = upstreamRes;
     let detail = '';
     try { const t = await upstreamRes.text(); detail = t ? ` — ${t.slice(0, 200)}` : ''; } catch (_) {}
     let error;
-    if (status === 401) {
-      error = '401: Token expired or invalid. Re-enter your Bearer Token.';
-    } else if (status === 403) {
-      error = '403: Forbidden — check PAT scopes (OR.Execution, OR.Monitoring, OR.Jobs) and folder access.';
-    } else if (status === 400) {
-      error = `400: Bad Request — verify Orchestrator URL, tenant name, API prefix, and folder ID.${detail}`;
-    } else {
-      error = `HTTP ${status} from Orchestrator${detail}`;
-    }
+    if (status === 401)      error = '401: Token expired or invalid. Re-authenticate.';
+    else if (status === 403) error = '403: Forbidden — check token scopes (OR.Execution, OR.Monitoring, OR.Jobs) and folder access.';
+    else if (status === 400) error = `400: Bad Request — verify Orchestrator URL, tenant, and folder ID.${detail}`;
+    else                     error = `HTTP ${status} from Orchestrator${detail}`;
     return json({ ok: false, error, status });
   }
 
-  // ── 7. Return data ────────────────────────────────────────────────────────────
   let data;
   try { data = await upstreamRes.json(); }
   catch { return json({ ok: false, error: 'Orchestrator returned a non-JSON response' }, 502); }
-
   return json({ ok: true, value: data.value || [] });
 }

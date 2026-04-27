@@ -54,7 +54,21 @@ async function proxyFetch(cfg, action, extra = {}) {
       ...extra,
     }),
   });
-  const data = await res.json();
+  // Read as text first so we control the parse error message
+  const text = await res.text();
+  if (!text) {
+    throw new Error(
+      `Empty response from /api/fetch-uipath (HTTP ${res.status}). ` +
+      `Ensure the Cloudflare Pages Function is deployed and the route is correct.`
+    );
+  }
+
+  let data;
+  try { data = JSON.parse(text); }
+  catch {
+    throw new Error(`Non-JSON response from proxy (HTTP ${res.status}): ${text.slice(0, 120)}`);
+  }
+
   if (!data.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data.value;
 }
@@ -73,6 +87,15 @@ function medianDurationMs(jobs, fallbackMs = 5 * 60 * 1000) {
   return durations.length % 2
     ? durations[mid]
     : (durations[mid - 1] + durations[mid]) / 2;
+}
+
+function parseInputArgs(raw) {
+  if (!raw) return null;
+  try {
+    const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
+    return null;
+  } catch { return null; }
 }
 
 // ─── Windows TZ name → IANA mapping ──────────────────────────────────────────
@@ -169,6 +192,65 @@ function normalizeQuartzCron(expr) {
     return null;
   }
   return joined;
+}
+
+// ─── CRON → human-readable description ───────────────────────────────────────
+function cronToHuman(cronExpr) {
+  const norm = normalizeQuartzCron(cronExpr);
+  if (!norm) return null;
+  const parts = norm.split(' ');
+  // Support 5-field (min hour dom month dow) or 6-field (sec min hour dom month dow)
+  const [min, hour, dom, month, dow] = parts.length === 6 ? parts.slice(1) : parts;
+
+  const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+  function fmt12(h, m) {
+    const hN = parseInt(h, 10), mN = parseInt(m, 10) || 0;
+    return `${hN % 12 || 12}:${String(mN).padStart(2,'0')} ${hN >= 12 ? 'PM' : 'AM'}`;
+  }
+  const isFixed = s => /^\d+$/.test(s);
+  const isStep  = s => /^\*\/\d+$/.test(s);
+
+  // Every N minutes
+  if (isStep(min) && hour === '*' && dom === '*' && month === '*' && dow === '*') {
+    const n = parseInt(min.slice(2), 10);
+    return n === 1 ? 'Every minute' : `Every ${n} minutes`;
+  }
+  // Every N hours (at :00)
+  if (min === '0' && isStep(hour) && dom === '*' && month === '*' && dow === '*') {
+    const n = parseInt(hour.slice(2), 10);
+    return `Every ${n} hour${n !== 1 ? 's' : ''}`;
+  }
+  // Hourly at :mm
+  if (isFixed(min) && hour === '*' && dom === '*' && month === '*' && dow === '*') {
+    return min === '0' ? 'Every hour' : `Every hour at :${String(parseInt(min, 10)).padStart(2,'0')}`;
+  }
+  // Daily at time
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && dow === '*') {
+    return `Daily at ${fmt12(hour, min)}`;
+  }
+  // Weekdays
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && (dow === '1-5' || dow === 'MON-FRI')) {
+    return `Weekdays at ${fmt12(hour, min)}`;
+  }
+  // Weekends
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && (dow === '0,6' || dow === '6,0' || dow === 'SAT,SUN')) {
+    return `Weekends at ${fmt12(hour, min)}`;
+  }
+  // Single day of week
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && /^[0-6]$/.test(dow)) {
+    return `Every ${DAYS[parseInt(dow, 10)]} at ${fmt12(hour, min)}`;
+  }
+  // Multiple days of week (comma list)
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && /^\d+(?:,\d+)+$/.test(dow)) {
+    const names = dow.split(',').map(d => DAYS[parseInt(d, 10)]).join(', ');
+    return `${names} at ${fmt12(hour, min)}`;
+  }
+  // Monthly on specific day
+  if (isFixed(min) && isFixed(hour) && isFixed(dom) && month === '*' && dow === '*') {
+    return `Monthly on day ${dom} at ${fmt12(hour, min)}`;
+  }
+  return null;
 }
 
 // ─── CRON projection (uses Croner UMD global `Cron`) ─────────────────────────
@@ -290,9 +372,16 @@ function Tooltip({ event, pos }) {
   if (!event) return null;
   const { schedule, occurrence } = event;
   const dur = occurrence.end - occurrence.start;
+  const humanCron = cronToHuman(schedule.cron);
+  const argEntries = schedule.inputArgs ? Object.entries(schedule.inputArgs) : [];
   return (
     <div className="tooltip" style={{ left: pos.x + 12, top: pos.y + 12 }}>
       <div className="tooltip-title">{schedule.name}</div>
+      {event.gapWarning && (
+        <div className="tooltip-row tooltip-warn">
+          <span>⚠ Less than 5 min before next job on this machine</span>
+        </div>
+      )}
       <div className="tooltip-row">
         <span className="tooltip-label">Start</span>
         <span className="tooltip-value">{fmtDate(occurrence.start)} {fmtTime(occurrence.start)}</span>
@@ -305,20 +394,32 @@ function Tooltip({ event, pos }) {
         <span className="tooltip-label">Duration</span>
         <span className="tooltip-value">{fmtDuration(dur)}</span>
       </div>
+      {humanCron && (
+        <div className="tooltip-row">
+          <span className="tooltip-label">Runs</span>
+          <span className="tooltip-value">{humanCron}</span>
+        </div>
+      )}
       {schedule.machine && (
         <div className="tooltip-row">
           <span className="tooltip-label">Machine</span>
           <span className="tooltip-value">{schedule.machine}</span>
         </div>
       )}
-      <div className="tooltip-row">
-        <span className="tooltip-label">CRON</span>
-        <span className="tooltip-value" style={{ fontFamily: 'monospace', fontSize: 11 }}>{schedule.cron}</span>
-      </div>
-      {schedule.tz && (
+      {schedule.serviceAccount && (
         <div className="tooltip-row">
-          <span className="tooltip-label">Timezone</span>
-          <span className="tooltip-value">{schedule.tz}</span>
+          <span className="tooltip-label">Account</span>
+          <span className="tooltip-value">{schedule.serviceAccount}</span>
+        </div>
+      )}
+      {argEntries.length > 0 && (
+        <div className="tooltip-row" style={{ alignItems: 'flex-start' }}>
+          <span className="tooltip-label">Args</span>
+          <span className="tooltip-value tooltip-args">
+            {argEntries.map(([k, v]) => (
+              <span key={k} className="tooltip-arg">{k}: <em>{String(v)}</em></span>
+            ))}
+          </span>
         </div>
       )}
     </div>
@@ -357,6 +458,7 @@ function EventChip({ event, color, onHover, onLeave }) {
       onMouseMove={e => onHover(event,  { x: e.clientX, y: e.clientY })}
       onMouseLeave={onLeave}
     >
+      {event.gapWarning && <span className="gap-warn-icon" title="Less than 5 min gap to next job">⚠</span>}
       {fmtTime(event.occurrence.start)} {event.schedule.name}
     </button>
   );
@@ -541,8 +643,11 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
                       onMouseEnter={e => onHover(ev, { x: e.clientX, y: e.clientY })}
                       onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
                       onMouseLeave={onLeave}>
-                      <div className="tg-event-time">{fmtTime(ev.occurrence.start)}</div>
-                      <div className="tg-event-name">{ev.schedule.name}</div>
+                      {heightPx >= 28 && <div className="tg-event-time">{fmtTime(ev.occurrence.start)}</div>}
+                      <div className="tg-event-name">
+                        {ev.gapWarning && <span className="gap-warn-icon" title="Less than 5 min gap to next job">⚠</span>}
+                        {ev.schedule.name}
+                      </div>
                     </div>
                   );
                 })}
@@ -698,30 +803,65 @@ function TokenField({ value, onChange }) {
 }
 
 // ─── Modal base ───────────────────────────────────────────────────────────────
-function Modal({ show, onClose, children }) {
-  useEffect(() => {
-    if (!show) return;
-    document.body.style.overflow = 'hidden';
-    function onKey(e) { if (e.key === 'Escape') onClose(); }
-    window.addEventListener('keydown', onKey);
-    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
-  }, [show, onClose]);
-  if (!show) return null;
+// ─── Hint icon (fixed-position tooltip, never clipped by overflow) ────────────
+function HintIcon({ text }) {
+  const ref = useRef(null);
+  const [tip, setTip] = useState(null);
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-card" onClick={e => e.stopPropagation()}>
-        {children}
-      </div>
+    <span className="hint-wrap" ref={ref}
+      onMouseEnter={() => {
+        const r = ref.current?.getBoundingClientRect();
+        if (r) setTip({ x: r.left + r.width / 2, y: r.top });
+      }}
+      onMouseLeave={() => setTip(null)}
+    >
+      <span className="hint-icon">?</span>
+      {tip && (
+        <div className="hint-tooltip" style={{ left: tip.x, top: tip.y }}>
+          {text}
+        </div>
+      )}
+    </span>
+  );
+}
+
+// ─── Popover (anchored dropdown, no full-screen overlay) ──────────────────────
+function Popover({ trigger, children, align = 'left' }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const toggle = useCallback(() => setOpen(v => !v), []);
+  const close  = useCallback(() => setOpen(false), []);
+
+  useEffect(() => {
+    if (!open) return;
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    function onDown(e) {
+      if (!wrapRef.current?.contains(e.target)) setOpen(false);
+    }
+    window.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDown);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', flexShrink: 0 }}>
+      {trigger({ open, toggle, close })}
+      {open && (
+        <div className={`popover${align === 'right' ? ' popover-right' : ''}`}>
+          {typeof children === 'function' ? children({ close }) : children}
+        </div>
+      )}
     </div>
   );
 }
 
-// ─── Connection modal ─────────────────────────────────────────────────────────
-function ConnectionModal({ show, onClose, cfg, onSave, loading }) {
+// ─── Connection popover ───────────────────────────────────────────────────────
+function ConnectionPopover({ cfg, onSave, loading, onClose }) {
   const [local, setLocal] = useState(cfg);
   const set = (k, v) => setLocal(p => ({ ...p, [k]: v }));
-
-  useEffect(() => { if (show) setLocal(cfg); }, [show]);
 
   const previewUrl = local.url && local.tenant
     ? `${local.url.replace(/\/$/, '')}/${local.tenant}${local.apiPrefix || ''}/odata/ProcessSchedules`
@@ -734,31 +874,37 @@ function ConnectionModal({ show, onClose, cfg, onSave, loading }) {
   }
 
   return (
-    <Modal show={show} onClose={onClose}>
-      <div className="modal-header">
-        <span className="modal-title">Connection Settings</span>
-        <button className="modal-close-btn" onClick={onClose}>×</button>
-      </div>
-      <div className="modal-body">
+    <>
+      <div className="popover-header">Connection</div>
+      <div className="popover-body">
         <div className="modal-field">
-          <div className="field-label">Orchestrator URL</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Orchestrator URL
+            <HintIcon text="Base URL of your UiPath Cloud or on-prem instance, e.g. https://cloud.uipath.com/myorg" />
+          </div>
           <input type="text" value={local.url} onChange={e => set('url', e.target.value)}
             placeholder="https://cloud.uipath.com/org" />
         </div>
         <div className="modal-field">
-          <div className="field-label">Tenant</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Tenant
+            <HintIcon text="Orchestrator tenant name, visible in the URL after the org segment. Usually 'Default'." />
+          </div>
           <input type="text" value={local.tenant} onChange={e => set('tenant', e.target.value)}
             placeholder="Default" />
         </div>
         <div className="modal-field">
-          <div className="field-label">Folder ID</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Folder ID
+            <HintIcon text="Optional numeric ID of the Orchestrator folder (Org Unit). Leave blank to use the root folder." />
+          </div>
           <input type="text" value={local.folder} onChange={e => set('folder', e.target.value)}
             placeholder="1234" />
         </div>
         <div className="modal-field">
-          <div className="field-label">
-            Orchestrator Path
-            <span className="field-badge">Cloud vs on-prem</span>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            API Path Prefix
+            <HintIcon text="Cloud Orchestrator: /orchestrator_  ·  On-prem: leave blank." />
           </div>
           <input type="text" value={local.apiPrefix} onChange={e => set('apiPrefix', e.target.value)}
             placeholder="/orchestrator_" />
@@ -778,76 +924,86 @@ function ConnectionModal({ show, onClose, cfg, onSave, loading }) {
           <TokenField value={local.token} onChange={v => set('token', v)} />
         </div>
         <div className="field-hint">
-          URL, Tenant, and Folder saved to localStorage. Token stored in sessionStorage only (clears on tab close).
-          All API calls are proxied server-side — your PAT never reaches third parties.
+          URL &amp; Tenant saved to localStorage. Token in sessionStorage only — cleared on tab close.
+          All API calls go through the server-side proxy; your PAT never leaves this domain.
         </div>
       </div>
-      <div className="modal-footer">
+      <div className="popover-footer">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn-primary" onClick={handleSave}
           disabled={loading || !local.url || !local.token}
           style={{ flex: 1, justifyContent: 'center' }}>
-          {loading ? 'Loading…' : 'Save & Fetch Schedules'}
+          {loading ? 'Loading…' : 'Save & Fetch'}
         </button>
       </div>
-    </Modal>
+    </>
   );
 }
 
-// ─── Settings modal ───────────────────────────────────────────────────────────
-function SettingsModal({ show, onClose, projDays, onProjDays, defaultDurMin, onDurMin, theme, onTheme, uiTimezone, onTimezone }) {
+// ─── Settings popover ─────────────────────────────────────────────────────────
+function SettingsPopover({ projDays, onProjDays, defaultDurMin, onDurMin, theme, onTheme, uiTimezone, onTimezone, onClose }) {
   const tzList = useMemo(() => {
     try { return Intl.supportedValuesOf('timeZone'); } catch (_) { return []; }
   }, []);
   return (
-    <Modal show={show} onClose={onClose}>
-      <div className="modal-header">
-        <span className="modal-title">Settings</span>
-        <button className="modal-close-btn" onClick={onClose}>×</button>
-      </div>
-      <div className="modal-body">
+    <>
+      <div className="popover-header">Settings</div>
+      <div className="popover-body">
         <div className="modal-field">
-          <div className="field-label">Projection Period</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Projection Period
+            <HintIcon text="How many days ahead to compute scheduled run occurrences. Longer periods use more CPU." />
+          </div>
           <select value={projDays} onChange={e => onProjDays(Number(e.target.value))}>
             {[7, 14, 30, 60].map(d => <option key={d} value={d}>{d} days</option>)}
           </select>
         </div>
         <div className="modal-field">
-          <div className="field-label">Default Schedule Duration (min)</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Default Duration (min)
+            <HintIcon text="Fallback event height used when no successful job history exists for a schedule." />
+          </div>
           <input type="number" min="1" max="1440" value={defaultDurMin}
             onChange={e => onDurMin(Math.max(1, Number(e.target.value) || 5))}
             placeholder="5" />
-          <div className="field-hint">Used when no job history is available.</div>
         </div>
         <div className="modal-field">
-          <div className="field-label">Appearance</div>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Appearance
+            <HintIcon text="Toggle between dark and light colour themes." />
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
             <button className="btn-ghost"
-              style={{ flex: 1, justifyContent: 'center', background: theme === 'dark' ? 'var(--c-border)' : '' }}
+              style={{ flex: 1, justifyContent: 'center',
+                background: theme === 'dark' ? 'var(--c-border)' : '' }}
               onClick={() => onTheme('dark')}>Dark</button>
             <button className="btn-ghost"
-              style={{ flex: 1, justifyContent: 'center', background: theme === 'light' ? 'var(--c-border)' : '' }}
+              style={{ flex: 1, justifyContent: 'center',
+                background: theme === 'light' ? 'var(--c-border)' : '' }}
               onClick={() => onTheme('light')}>Light</button>
           </div>
         </div>
         <div className="modal-field">
-          <div className="field-label">Display Timezone</div>
-          <input type="text" list="tz-datalist" value={uiTimezone} onChange={e => onTimezone(e.target.value)}
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+            Display Timezone
+            <HintIcon text="IANA timezone used as fallback when a schedule has no timezone set in Orchestrator (e.g. America/New_York)." />
+          </div>
+          <input type="text" list="tz-datalist" value={uiTimezone}
+            onChange={e => onTimezone(e.target.value)}
             placeholder="e.g. America/New_York" />
           {tzList.length > 0 && (
             <datalist id="tz-datalist">
               {tzList.map(tz => <option key={tz} value={tz} />)}
             </datalist>
           )}
-          <div className="field-hint">Fallback when a schedule has no configured timezone.</div>
         </div>
       </div>
-      <div className="modal-footer">
+      <div className="popover-footer">
         <button className="btn-primary" onClick={onClose} style={{ flex: 1, justifyContent: 'center' }}>
-          Save & Close
+          Done
         </button>
       </div>
-    </Modal>
+    </>
   );
 }
 
@@ -878,8 +1034,6 @@ function App() {
     localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone
   );
   const [defaultDurMin,    setDefaultDurMin]    = useState(() => Number(localStorage.getItem(LS_KEYS.durMin)) || 5);
-  const [showConnModal,    setShowConnModal]    = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [schedules,        setSchedules]        = useState([]);
   const [colorMap,         setColorMap]         = useState({});
   const [selectedProcs,    setSelectedProcs]    = useState(new Set());
@@ -889,6 +1043,8 @@ function App() {
   const [error,       setError]       = useState(null);
   const [eventsByDay, setEventsByDay] = useState({});
   const [calView,     setCalView]     = useState('month'); // 'month'|'week'|'3day'|'day'
+  const calViewRef = useRef('month');
+  useEffect(() => { calViewRef.current = calView; }, [calView]);
   const [anchorDate,  setAnchorDate]  = useState(() => {
     const t = new Date();
     return new Date(t.getFullYear(), t.getMonth(), 1); // first of current month
@@ -950,14 +1106,18 @@ function App() {
         const results = await Promise.allSettled(
           batch.map(async s => {
             let jobs = [];
-            try { jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name); } catch (_) {}
+            try { jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name); }
+            catch (e) { console.warn('[USV] Job history unavailable for', s.ReleaseName || s.Name, '—', e.message); }
+            const rawArgs = s.InputArguments || jobs[0]?.InputArguments || null;
             return {
-              id:      s.Id,
-              name:    s.ReleaseName || s.Name,
-              cron:    s.StartProcessCron,
-              tz:      s.TimeZoneId,
-              machine: s.MachineRobotAssignment || null,
-              medianMs: medianDurationMs(jobs, fallbackMs),
+              id:             s.Id,
+              name:           s.ReleaseName || s.Name,
+              cron:           s.StartProcessCron,
+              tz:             s.TimeZoneId,
+              machine:        s.MachineRobotAssignment || null,
+              serviceAccount: s.ServiceAccountDisplayName || null,
+              inputArgs:      parseInputArgs(rawArgs),
+              medianMs:       medianDurationMs(jobs, fallbackMs),
             };
           })
         );
@@ -965,9 +1125,18 @@ function App() {
       }
 
       setSchedules(enriched);
-      // Jump calendar to today after successful load
+      // Jump calendar to today in the current view after successful load
       const t = new Date();
-      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
+      const cv = calViewRef.current;
+      if (cv === 'week') {
+        const d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+        d.setDate(d.getDate() - d.getDay());
+        setAnchorDate(d);
+      } else if (cv === 'day' || cv === '3day') {
+        setAnchorDate(new Date(t.getFullYear(), t.getMonth(), t.getDate()));
+      } else {
+        setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
+      }
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -1004,6 +1173,23 @@ function App() {
       Object.values(byDay).forEach(arr =>
         arr.sort((a, b) => a.occurrence.start - b.occurrence.start)
       );
+
+      // Gap detection: flag events where the next run on the same machine starts < 5 min after this one ends
+      const allEvents = Object.values(byDay).flat();
+      const byMachine = {};
+      allEvents.forEach(ev => {
+        const m = ev.schedule.machine || 'Unassigned';
+        if (!byMachine[m]) byMachine[m] = [];
+        byMachine[m].push(ev);
+      });
+      const GAP_MS = 5 * 60 * 1000;
+      Object.values(byMachine).forEach(evts => {
+        evts.sort((a, b) => a.occurrence.start - b.occurrence.start);
+        for (let i = 0; i < evts.length - 1; i++) {
+          const gap = evts[i + 1].occurrence.start - evts[i].occurrence.end;
+          if (gap >= 0 && gap < GAP_MS) evts[i].gapWarning = true;
+        }
+      });
 
       setEventsByDay(byDay);
       setProjecting(false);
@@ -1129,24 +1315,44 @@ function App() {
           </span>
         </div>
 
-        {/* Connection Settings button */}
-        <button className="btn-ghost" onClick={() => setShowConnModal(true)}
-          style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          <span style={{
-            width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-            background: cfg.token ? '#00C48C' : '#FA4616',
-            boxShadow: cfg.token ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
-          }} />
-          Connection
-        </button>
+        {/* Connection popover */}
+        <Popover align="left" trigger={({ open, toggle }) => (
+          <button className="btn-ghost" onClick={toggle}
+            style={{ display: 'flex', alignItems: 'center', gap: 6,
+              background: open ? 'var(--c-border)' : '' }}>
+            <span style={{
+              width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+              background: cfg.token ? '#00C48C' : '#FA4616',
+              boxShadow: cfg.token ? '0 0 5px #00C48C88' : '0 0 5px #FA461688',
+            }} />
+            Connection
+          </button>
+        )}>
+          {({ close }) => (
+            <ConnectionPopover cfg={cfg} onSave={handleConnSave} loading={loading} onClose={close} />
+          )}
+        </Popover>
 
-        {/* Settings gear */}
-        <button className="theme-toggle" onClick={() => setShowSettingsModal(true)} title="Settings">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-          </svg>
-        </button>
+        {/* Settings popover */}
+        <Popover align="right" trigger={({ open, toggle }) => (
+          <button className="theme-toggle" onClick={toggle} title="Settings"
+            style={{ background: open ? 'var(--c-border)' : '' }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        )}>
+          {({ close }) => (
+            <SettingsPopover
+              projDays={projDays} onProjDays={setProjDays}
+              defaultDurMin={defaultDurMin} onDurMin={setDefaultDurMin}
+              theme={theme} onTheme={setTheme}
+              uiTimezone={uiTimezone} onTimezone={setUiTimezone}
+              onClose={close}
+            />
+          )}
+        </Popover>
 
         {/* View switcher */}
         <div className="view-switcher">
@@ -1343,26 +1549,6 @@ function App() {
       {/* Toast portal – fixed top-right */}
       <Toast error={error} onClose={() => setError(null)} />
 
-      {/* Modals */}
-      <ConnectionModal
-        show={showConnModal}
-        onClose={() => setShowConnModal(false)}
-        cfg={cfg}
-        onSave={handleConnSave}
-        loading={loading}
-      />
-      <SettingsModal
-        show={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-        projDays={projDays}
-        onProjDays={setProjDays}
-        defaultDurMin={defaultDurMin}
-        onDurMin={setDefaultDurMin}
-        theme={theme}
-        onTheme={setTheme}
-        uiTimezone={uiTimezone}
-        onTimezone={setUiTimezone}
-      />
     </div>
   );
 }

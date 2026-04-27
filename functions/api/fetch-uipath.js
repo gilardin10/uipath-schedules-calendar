@@ -67,7 +67,7 @@ export async function onRequestPost({ request }) {
   if (action === 'schedules') {
     odataPath   = '/odata/ProcessSchedules';
     odataParams = {
-      '$select': 'Id,Name,StartProcessCron,TimeZoneId,Enabled,ReleaseId,ReleaseName',
+      '$select': 'Id,Name,StartProcessCron,TimeZoneId,Enabled,ReleaseId,ReleaseName,ServiceAccountDisplayName,InputArguments,RuntimeType',
       '$filter': 'Enabled eq true',
       '$top':    '500',
     };
@@ -78,7 +78,7 @@ export async function onRequestPost({ request }) {
     odataPath   = '/odata/Jobs';
     odataParams = {
       '$filter':  `ReleaseName eq '${safe}'`,
-      '$select':  'Id,StartTime,EndTime,State',
+      '$select':  'Id,StartTime,EndTime,State,InputArguments',
       '$orderby': 'StartTime desc',
       '$top':     '10',
     };

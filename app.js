@@ -54,7 +54,6 @@ async function proxyFetch(cfg, action, extra = {}) {
       ...extra,
     }),
   });
-
   // Read as text first so we control the parse error message
   const text = await res.text();
   if (!text) {
@@ -88,6 +87,15 @@ function medianDurationMs(jobs, fallbackMs = 5 * 60 * 1000) {
   return durations.length % 2
     ? durations[mid]
     : (durations[mid - 1] + durations[mid]) / 2;
+}
+
+function parseInputArgs(raw) {
+  if (!raw) return null;
+  try {
+    const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
+    return null;
+  } catch { return null; }
 }
 
 // ─── Windows TZ name → IANA mapping ──────────────────────────────────────────
@@ -184,6 +192,65 @@ function normalizeQuartzCron(expr) {
     return null;
   }
   return joined;
+}
+
+// ─── CRON → human-readable description ───────────────────────────────────────
+function cronToHuman(cronExpr) {
+  const norm = normalizeQuartzCron(cronExpr);
+  if (!norm) return null;
+  const parts = norm.split(' ');
+  // Support 5-field (min hour dom month dow) or 6-field (sec min hour dom month dow)
+  const [min, hour, dom, month, dow] = parts.length === 6 ? parts.slice(1) : parts;
+
+  const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+  function fmt12(h, m) {
+    const hN = parseInt(h, 10), mN = parseInt(m, 10) || 0;
+    return `${hN % 12 || 12}:${String(mN).padStart(2,'0')} ${hN >= 12 ? 'PM' : 'AM'}`;
+  }
+  const isFixed = s => /^\d+$/.test(s);
+  const isStep  = s => /^\*\/\d+$/.test(s);
+
+  // Every N minutes
+  if (isStep(min) && hour === '*' && dom === '*' && month === '*' && dow === '*') {
+    const n = parseInt(min.slice(2), 10);
+    return n === 1 ? 'Every minute' : `Every ${n} minutes`;
+  }
+  // Every N hours (at :00)
+  if (min === '0' && isStep(hour) && dom === '*' && month === '*' && dow === '*') {
+    const n = parseInt(hour.slice(2), 10);
+    return `Every ${n} hour${n !== 1 ? 's' : ''}`;
+  }
+  // Hourly at :mm
+  if (isFixed(min) && hour === '*' && dom === '*' && month === '*' && dow === '*') {
+    return min === '0' ? 'Every hour' : `Every hour at :${String(parseInt(min, 10)).padStart(2,'0')}`;
+  }
+  // Daily at time
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && dow === '*') {
+    return `Daily at ${fmt12(hour, min)}`;
+  }
+  // Weekdays
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && (dow === '1-5' || dow === 'MON-FRI')) {
+    return `Weekdays at ${fmt12(hour, min)}`;
+  }
+  // Weekends
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && (dow === '0,6' || dow === '6,0' || dow === 'SAT,SUN')) {
+    return `Weekends at ${fmt12(hour, min)}`;
+  }
+  // Single day of week
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && /^[0-6]$/.test(dow)) {
+    return `Every ${DAYS[parseInt(dow, 10)]} at ${fmt12(hour, min)}`;
+  }
+  // Multiple days of week (comma list)
+  if (isFixed(min) && isFixed(hour) && dom === '*' && month === '*' && /^\d+(?:,\d+)+$/.test(dow)) {
+    const names = dow.split(',').map(d => DAYS[parseInt(d, 10)]).join(', ');
+    return `${names} at ${fmt12(hour, min)}`;
+  }
+  // Monthly on specific day
+  if (isFixed(min) && isFixed(hour) && isFixed(dom) && month === '*' && dow === '*') {
+    return `Monthly on day ${dom} at ${fmt12(hour, min)}`;
+  }
+  return null;
 }
 
 // ─── CRON projection (uses Croner UMD global `Cron`) ─────────────────────────
@@ -305,9 +372,16 @@ function Tooltip({ event, pos }) {
   if (!event) return null;
   const { schedule, occurrence } = event;
   const dur = occurrence.end - occurrence.start;
+  const humanCron = cronToHuman(schedule.cron);
+  const argEntries = schedule.inputArgs ? Object.entries(schedule.inputArgs) : [];
   return (
     <div className="tooltip" style={{ left: pos.x + 12, top: pos.y + 12 }}>
       <div className="tooltip-title">{schedule.name}</div>
+      {event.gapWarning && (
+        <div className="tooltip-row tooltip-warn">
+          <span>⚠ Less than 5 min before next job on this machine</span>
+        </div>
+      )}
       <div className="tooltip-row">
         <span className="tooltip-label">Start</span>
         <span className="tooltip-value">{fmtDate(occurrence.start)} {fmtTime(occurrence.start)}</span>
@@ -320,20 +394,32 @@ function Tooltip({ event, pos }) {
         <span className="tooltip-label">Duration</span>
         <span className="tooltip-value">{fmtDuration(dur)}</span>
       </div>
+      {humanCron && (
+        <div className="tooltip-row">
+          <span className="tooltip-label">Runs</span>
+          <span className="tooltip-value">{humanCron}</span>
+        </div>
+      )}
       {schedule.machine && (
         <div className="tooltip-row">
           <span className="tooltip-label">Machine</span>
           <span className="tooltip-value">{schedule.machine}</span>
         </div>
       )}
-      <div className="tooltip-row">
-        <span className="tooltip-label">CRON</span>
-        <span className="tooltip-value" style={{ fontFamily: 'monospace', fontSize: 11 }}>{schedule.cron}</span>
-      </div>
-      {schedule.tz && (
+      {schedule.serviceAccount && (
         <div className="tooltip-row">
-          <span className="tooltip-label">Timezone</span>
-          <span className="tooltip-value">{schedule.tz}</span>
+          <span className="tooltip-label">Account</span>
+          <span className="tooltip-value">{schedule.serviceAccount}</span>
+        </div>
+      )}
+      {argEntries.length > 0 && (
+        <div className="tooltip-row" style={{ alignItems: 'flex-start' }}>
+          <span className="tooltip-label">Args</span>
+          <span className="tooltip-value tooltip-args">
+            {argEntries.map(([k, v]) => (
+              <span key={k} className="tooltip-arg">{k}: <em>{String(v)}</em></span>
+            ))}
+          </span>
         </div>
       )}
     </div>
@@ -372,6 +458,7 @@ function EventChip({ event, color, onHover, onLeave }) {
       onMouseMove={e => onHover(event,  { x: e.clientX, y: e.clientY })}
       onMouseLeave={onLeave}
     >
+      {event.gapWarning && <span className="gap-warn-icon" title="Less than 5 min gap to next job">⚠</span>}
       {fmtTime(event.occurrence.start)} {event.schedule.name}
     </button>
   );
@@ -556,8 +643,11 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
                       onMouseEnter={e => onHover(ev, { x: e.clientX, y: e.clientY })}
                       onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
                       onMouseLeave={onLeave}>
-                      <div className="tg-event-time">{fmtTime(ev.occurrence.start)}</div>
-                      <div className="tg-event-name">{ev.schedule.name}</div>
+                      {heightPx >= 28 && <div className="tg-event-time">{fmtTime(ev.occurrence.start)}</div>}
+                      <div className="tg-event-name">
+                        {ev.gapWarning && <span className="gap-warn-icon" title="Less than 5 min gap to next job">⚠</span>}
+                        {ev.schedule.name}
+                      </div>
                     </div>
                   );
                 })}
@@ -712,6 +802,7 @@ function TokenField({ value, onChange }) {
   );
 }
 
+// ─── Modal base ───────────────────────────────────────────────────────────────
 // ─── Hint icon (fixed-position tooltip, never clipped by overflow) ────────────
 function HintIcon({ text }) {
   const ref = useRef(null);
@@ -952,6 +1043,8 @@ function App() {
   const [error,       setError]       = useState(null);
   const [eventsByDay, setEventsByDay] = useState({});
   const [calView,     setCalView]     = useState('month'); // 'month'|'week'|'3day'|'day'
+  const calViewRef = useRef('month');
+  useEffect(() => { calViewRef.current = calView; }, [calView]);
   const [anchorDate,  setAnchorDate]  = useState(() => {
     const t = new Date();
     return new Date(t.getFullYear(), t.getMonth(), 1); // first of current month
@@ -1015,13 +1108,16 @@ function App() {
             let jobs = [];
             try { jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name); }
             catch (e) { console.warn('[USV] Job history unavailable for', s.ReleaseName || s.Name, '—', e.message); }
+            const rawArgs = s.InputArguments || jobs[0]?.InputArguments || null;
             return {
-              id:      s.Id,
-              name:    s.ReleaseName || s.Name,
-              cron:    s.StartProcessCron,
-              tz:      s.TimeZoneId,
-              machine: s.MachineRobotAssignment || null,
-              medianMs: medianDurationMs(jobs, fallbackMs),
+              id:             s.Id,
+              name:           s.ReleaseName || s.Name,
+              cron:           s.StartProcessCron,
+              tz:             s.TimeZoneId,
+              machine:        s.MachineRobotAssignment || null,
+              serviceAccount: s.ServiceAccountDisplayName || null,
+              inputArgs:      parseInputArgs(rawArgs),
+              medianMs:       medianDurationMs(jobs, fallbackMs),
             };
           })
         );
@@ -1029,9 +1125,18 @@ function App() {
       }
 
       setSchedules(enriched);
-      // Jump calendar to today after successful load
+      // Jump calendar to today in the current view after successful load
       const t = new Date();
-      setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
+      const cv = calViewRef.current;
+      if (cv === 'week') {
+        const d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+        d.setDate(d.getDate() - d.getDay());
+        setAnchorDate(d);
+      } else if (cv === 'day' || cv === '3day') {
+        setAnchorDate(new Date(t.getFullYear(), t.getMonth(), t.getDate()));
+      } else {
+        setAnchorDate(new Date(t.getFullYear(), t.getMonth(), 1));
+      }
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -1068,6 +1173,23 @@ function App() {
       Object.values(byDay).forEach(arr =>
         arr.sort((a, b) => a.occurrence.start - b.occurrence.start)
       );
+
+      // Gap detection: flag events where the next run on the same machine starts < 5 min after this one ends
+      const allEvents = Object.values(byDay).flat();
+      const byMachine = {};
+      allEvents.forEach(ev => {
+        const m = ev.schedule.machine || 'Unassigned';
+        if (!byMachine[m]) byMachine[m] = [];
+        byMachine[m].push(ev);
+      });
+      const GAP_MS = 5 * 60 * 1000;
+      Object.values(byMachine).forEach(evts => {
+        evts.sort((a, b) => a.occurrence.start - b.occurrence.start);
+        for (let i = 0; i < evts.length - 1; i++) {
+          const gap = evts[i + 1].occurrence.start - evts[i].occurrence.end;
+          if (gap >= 0 && gap < GAP_MS) evts[i].gapWarning = true;
+        }
+      });
 
       setEventsByDay(byDay);
       setProjecting(false);

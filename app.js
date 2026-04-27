@@ -1,4 +1,4 @@
-// UiPath Schedule Visualizer – Apollo Dark Mode
+// UiPath Job Schedules – Apollo Dark Mode
 // React 18 + Babel standalone + cron-parser + Lucide
 
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
@@ -278,11 +278,15 @@ function projectSchedule(cronExpr, tzId, days, medianMs, uiTimezone) {
 }
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
-function fmtTime(d) {
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function fmtTime(d, tz) {
+  const opts = { hour: '2-digit', minute: '2-digit' };
+  if (tz) opts.timeZone = tz;
+  return d.toLocaleTimeString([], opts);
 }
-function fmtDate(d) {
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+function fmtDate(d, tz) {
+  const opts = { month: 'short', day: 'numeric' };
+  if (tz) opts.timeZone = tz;
+  return d.toLocaleDateString([], opts);
 }
 function fmtDuration(ms) {
   const s = Math.round(ms / 1000);
@@ -290,10 +294,15 @@ function fmtDuration(ms) {
   if (s < 3600) return `${Math.round(s/60)}m`;
   return `${(s/3600).toFixed(1)}h`;
 }
-function sameDay(a, b) {
-  return a.getFullYear() === b.getFullYear() &&
-         a.getMonth()    === b.getMonth()    &&
-         a.getDate()     === b.getDate();
+// Returns a stable string key "Y-M0-D" for a Date in the given IANA timezone (M0 = 0-indexed month)
+function dayKey(d, tz) {
+  if (!tz) return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const s = d.toLocaleDateString('sv-SE', { timeZone: tz }); // "YYYY-MM-DD"
+  const [y, m, day] = s.split('-').map(Number);
+  return `${y}-${m - 1}-${day}`;
+}
+function sameDay(a, b, tz) {
+  return dayKey(a, tz) === dayKey(b, tz);
 }
 function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function endOfMonth(d)   { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
@@ -368,7 +377,7 @@ function CalendarSkeleton() {
 }
 
 // ─── Tooltip ─────────────────────────────────────────────────────────────────
-function Tooltip({ event, pos }) {
+function Tooltip({ event, pos, uiTimezone }) {
   if (!event) return null;
   const { schedule, occurrence } = event;
   const dur = occurrence.end - occurrence.start;
@@ -384,11 +393,11 @@ function Tooltip({ event, pos }) {
       )}
       <div className="tooltip-row">
         <span className="tooltip-label">Start</span>
-        <span className="tooltip-value">{fmtDate(occurrence.start)} {fmtTime(occurrence.start)}</span>
+        <span className="tooltip-value">{fmtDate(occurrence.start, uiTimezone)} {fmtTime(occurrence.start, uiTimezone)}</span>
       </div>
       <div className="tooltip-row">
         <span className="tooltip-label">Est. End</span>
-        <span className="tooltip-value">{fmtTime(occurrence.end)}</span>
+        <span className="tooltip-value">{fmtTime(occurrence.end, uiTimezone)}</span>
       </div>
       <div className="tooltip-row">
         <span className="tooltip-label">Duration</span>
@@ -449,7 +458,7 @@ function Toast({ error, onClose }) {
 }
 
 // ─── Event chip ───────────────────────────────────────────────────────────────
-function EventChip({ event, color, onHover, onLeave }) {
+function EventChip({ event, color, onHover, onLeave, uiTimezone }) {
   return (
     <button
       className="event-chip"
@@ -459,14 +468,14 @@ function EventChip({ event, color, onHover, onLeave }) {
       onMouseLeave={onLeave}
     >
       {event.gapWarning && <span className="gap-warn-icon" title="Less than 5 min gap to next job">⚠</span>}
-      {fmtTime(event.occurrence.start)} {event.schedule.name}
+      {fmtTime(event.occurrence.start, uiTimezone)} {event.schedule.name}
     </button>
   );
 }
 
 // ─── Calendar day cell ────────────────────────────────────────────────────────
 const MAX_VISIBLE = 3;
-function CalDay({ date, events, colorMap, isToday, isOtherMonth, onHover, onLeave }) {
+function CalDay({ date, events, colorMap, isToday, isOtherMonth, onHover, onLeave, uiTimezone }) {
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? events : events.slice(0, MAX_VISIBLE);
   const overflow = events.length - MAX_VISIBLE;
@@ -481,6 +490,7 @@ function CalDay({ date, events, colorMap, isToday, isOtherMonth, onHover, onLeav
           color={colorMap[ev.schedule.id] || 'var(--c-muted)'}
           onHover={onHover}
           onLeave={onLeave}
+          uiTimezone={uiTimezone}
         />
       ))}
       {!expanded && overflow > 0 && (
@@ -500,7 +510,7 @@ function CalDay({ date, events, colorMap, isToday, isOtherMonth, onHover, onLeav
 // ─── Calendar month view ──────────────────────────────────────────────────────
 const WEEK_DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
-function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave }) {
+function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave, uiTimezone }) {
   const today  = new Date();
   const first  = startOfMonth(month);
   const last   = endOfMonth(month);
@@ -527,7 +537,7 @@ function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave }) {
       </div>
       <div className="cal-grid" style={{ gap: 2 }}>
         {cells.map((date, i) => {
-          const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+          const key = dayKey(date, uiTimezone);
           const events = eventsByDay[key] || [];
           return (
             <CalDay
@@ -535,10 +545,11 @@ function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave }) {
               date={date}
               events={events}
               colorMap={colorMap}
-              isToday={sameDay(date, today)}
+              isToday={sameDay(date, today, uiTimezone)}
               isOtherMonth={date.getMonth() !== month.getMonth()}
               onHover={onHover}
               onLeave={onLeave}
+              uiTimezone={uiTimezone}
             />
           );
         })}
@@ -550,7 +561,7 @@ function CalendarMonth({ month, eventsByDay, colorMap, onHover, onLeave }) {
 // ─── Time-grid view (week / 3-day / day) ─────────────────────────────────────
 const HOUR_H = 52; // px per hour row
 
-function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
+function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave, uiTimezone }) {
   const scrollRef = useRef(null);
   const today = new Date();
 
@@ -559,13 +570,35 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
     if (scrollRef.current) scrollRef.current.scrollTop = 7 * HOUR_H;
   }, []);
 
+  // Compute current time position in the display timezone
+  function nowMinInTz() {
+    try {
+      const t = new Date().toLocaleTimeString('sv-SE', { timeZone: uiTimezone || undefined });
+      const [h, m] = t.split(':').map(Number);
+      return h * 60 + m;
+    } catch (_) {
+      return new Date().getHours() * 60 + new Date().getMinutes();
+    }
+  }
+
+  // Compute start-of-day position for an event in the display timezone
+  function eventStartMin(d) {
+    try {
+      const t = d.toLocaleTimeString('sv-SE', { timeZone: uiTimezone || undefined });
+      const [h, m] = t.split(':').map(Number);
+      return h * 60 + m;
+    } catch (_) {
+      return d.getHours() * 60 + d.getMinutes();
+    }
+  }
+
   return (
     <div className="tg-wrap">
       {/* ── Day headers ── */}
       <div className="tg-header">
         <div className="tg-gutter" />
         {days.map((date, i) => {
-          const isToday = sameDay(date, today);
+          const isToday = sameDay(date, today, uiTimezone);
           return (
             <div key={i} className="tg-day-hdr">
               <div className="tg-day-weekday">
@@ -596,11 +629,11 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
 
           {/* Day columns */}
           {days.map((date, di) => {
-            const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
-            const events = eventsByDay[key] || [];
-            const laid   = computeEventCols(events);
-            const isToday = sameDay(date, today);
-            const nowMin  = isToday ? today.getHours() * 60 + today.getMinutes() : null;
+            const key     = dayKey(date, uiTimezone);
+            const events  = eventsByDay[key] || [];
+            const laid    = computeEventCols(events);
+            const isToday = sameDay(date, today, uiTimezone);
+            const nowMin  = isToday ? nowMinInTz() : null;
 
             return (
               <div key={di} className="tg-col"
@@ -624,7 +657,7 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
 
                 {/* Events */}
                 {laid.map(({ ev, col, totalCols }, i) => {
-                  const startMin = ev.occurrence.start.getHours() * 60 + ev.occurrence.start.getMinutes();
+                  const startMin = eventStartMin(ev.occurrence.start);
                   const durMin   = Math.max((ev.occurrence.end - ev.occurrence.start) / 60000, 15);
                   const topPx    = (startMin / 60) * HOUR_H;
                   const heightPx = Math.max((durMin / 60) * HOUR_H - 2, 18);
@@ -634,8 +667,8 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
                     <div key={i} className="tg-event"
                       style={{
                         top: topPx + 1, height: heightPx,
-                        left: `calc(${col * pct}% + 2px)`,
-                        width: `calc(${pct}% - 4px)`,
+                        left: `${col * pct}%`,
+                        width: `${pct}%`,
                         background: color + '28',
                         borderLeft: `3px solid ${color}`,
                         color,
@@ -643,7 +676,7 @@ function CalendarTimeGrid({ days, eventsByDay, colorMap, onHover, onLeave }) {
                       onMouseEnter={e => onHover(ev, { x: e.clientX, y: e.clientY })}
                       onMouseMove={e  => onHover(ev, { x: e.clientX, y: e.clientY })}
                       onMouseLeave={onLeave}>
-                      {heightPx >= 28 && <div className="tg-event-time">{fmtTime(ev.occurrence.start)}</div>}
+                      {heightPx >= 28 && <div className="tg-event-time">{fmtTime(ev.occurrence.start, uiTimezone)}</div>}
                       <div className="tg-event-name">
                         {ev.gapWarning && <span className="gap-warn-icon" title="Less than 5 min gap to next job">⚠</span>}
                         {ev.schedule.name}
@@ -895,14 +928,6 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
         </div>
         <div className="modal-field">
           <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
-            Folder ID
-            <HintIcon text="Optional numeric ID of the Orchestrator folder (Org Unit). Leave blank to use the root folder." />
-          </div>
-          <input type="text" value={local.folder} onChange={e => set('folder', e.target.value)}
-            placeholder="1234" />
-        </div>
-        <div className="modal-field">
-          <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
             API Path Prefix
             <HintIcon text="Cloud Orchestrator: /orchestrator_  ·  On-prem: leave blank." />
           </div>
@@ -986,7 +1011,7 @@ function SettingsPopover({ projDays, onProjDays, defaultDurMin, onDurMin, theme,
         <div className="modal-field">
           <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
             Display Timezone
-            <HintIcon text="IANA timezone used as fallback when a schedule has no timezone set in Orchestrator (e.g. America/New_York)." />
+            <HintIcon text="IANA timezone for your calendar display. All event times are converted to this zone. e.g. America/New_York" />
           </div>
           <input type="text" list="tz-datalist" value={uiTimezone}
             onChange={e => onTimezone(e.target.value)}
@@ -1030,21 +1055,33 @@ function Legend({ schedules, colorMap, selectedProcs, onToggle }) {
 function App() {
   const [cfg,              setCfg]              = useState(loadConfig);
   const [theme,            setTheme]            = useState(() => localStorage.getItem(LS_KEYS.theme) || 'dark');
-  const [uiTimezone,       setUiTimezone]       = useState(() =>
-    localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone
-  );
+  const [uiTimezone,       setUiTimezone]       = useState(() => {
+    const tzUrl = new URLSearchParams(window.location.search).get('tz');
+    if (tzUrl) return tzUrl;
+    return localStorage.getItem(LS_KEYS.uiTz) || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  });
   const [defaultDurMin,    setDefaultDurMin]    = useState(() => Number(localStorage.getItem(LS_KEYS.durMin)) || 5);
   const [schedules,        setSchedules]        = useState([]);
+  const [folders,          setFolders]          = useState([]);
+  const [selectedFolders,  setSelectedFolders]  = useState(new Set());
   const [colorMap,         setColorMap]         = useState({});
   const [selectedProcs,    setSelectedProcs]    = useState(new Set());
-  const [projDays,         setProjDays]         = useState(30);
+  const [projDays,         setProjDays]         = useState(() => {
+    const d = parseInt(new URLSearchParams(window.location.search).get('days'), 10);
+    return (d > 0 && d <= 365) ? d : 30;
+  });
   const [loading,     setLoading]     = useState(false);
   const [projecting,  setProjecting]  = useState(false);
   const [error,       setError]       = useState(null);
   const [eventsByDay, setEventsByDay] = useState({});
-  const [calView,     setCalView]     = useState('month'); // 'month'|'week'|'3day'|'day'
+  const [calView,     setCalView]     = useState(() => {
+    const v = new URLSearchParams(window.location.search).get('view');
+    return ['month','week','3day','day'].includes(v) ? v : 'month';
+  });
   const calViewRef = useRef('month');
   useEffect(() => { calViewRef.current = calView; }, [calView]);
+  // Holds URL filter state captured at the start of each handleFetch call
+  const pendingHiddenFiltersRef = useRef({ procs: new Set(), machines: new Set(), folders: new Set() });
   const [anchorDate,  setAnchorDate]  = useState(() => {
     const t = new Date();
     return new Date(t.getFullYear(), t.getMonth(), 1); // first of current month
@@ -1079,34 +1116,78 @@ function App() {
   }, [defaultDurMin]);
 
   useEffect(() => {
-    setSelectedMachines(new Set(machines.map(m => m.id)));
+    const hidden = pendingHiddenFiltersRef.current.machines;
+    setSelectedMachines(new Set(machines.map(m => m.id).filter(id => !hidden.has(id))));
   }, [machines]);
+
+  useEffect(() => {
+    const hidden = pendingHiddenFiltersRef.current.folders;
+    setSelectedFolders(new Set(folders.map(f => String(f.Id)).filter(id => !hidden.has(id))));
+  }, [folders]);
 
   // ── Fetch schedules + median durations ──────────────────────────────────────
   const handleFetch = useCallback(async (fetchCfg) => {
     setLoading(true);
     setError(null);
     setSchedules([]);
+    setFolders([]);
     setEventsByDay({});
+    // Snapshot URL filter params at fetch start so effects can apply them consistently
+    const _urlP = new URLSearchParams(window.location.search);
+    pendingHiddenFiltersRef.current = {
+      procs:    new Set((_urlP.get('hp') || '').split(',').filter(Boolean)),
+      machines: new Set((_urlP.get('hm') || '').split(',').filter(Boolean)),
+      folders:  new Set((_urlP.get('hf') || '').split(',').filter(Boolean)),
+    };
     try {
-      const raw = await fetchSchedules(fetchCfg);
+      // Step 1: discover all accessible folders
+      let discoveredFolders = [];
+      try {
+        discoveredFolders = await proxyFetch({ ...fetchCfg, folder: '' }, 'folders');
+      } catch (e) {
+        console.warn('[USV] Folder discovery failed, using root folder:', e.message);
+        discoveredFolders = [{ Id: '', DisplayName: 'Default', FullyQualifiedName: 'Default' }];
+      }
+      if (!discoveredFolders.length) {
+        discoveredFolders = [{ Id: '', DisplayName: 'Default', FullyQualifiedName: 'Default' }];
+      }
+      setFolders(discoveredFolders);
+
+      // Step 2: fetch schedules from every folder in parallel
+      const allRaw = [];
+      const seenIds = new Set();
+      await Promise.allSettled(discoveredFolders.map(async folder => {
+        try {
+          const cfgF = { ...fetchCfg, folder: String(folder.Id) };
+          const rows = await fetchSchedules(cfgF);
+          for (const s of rows) {
+            if (!seenIds.has(s.Id)) {
+              seenIds.add(s.Id);
+              allRaw.push({ ...s, _folderId: String(folder.Id), _folderName: folder.DisplayName || folder.FullyQualifiedName });
+            }
+          }
+        } catch (e) {
+          console.warn('[USV] Schedule fetch failed for folder', folder.DisplayName, '—', e.message);
+        }
+      }));
 
       // Build color map
       const cm = {};
-      raw.forEach((s, i) => { cm[s.Id] = colorForIndex(i); });
+      allRaw.forEach((s, i) => { cm[s.Id] = colorForIndex(i); });
       setColorMap(cm);
-      setSelectedProcs(new Set(raw.map(s => s.Id)));
+      const _hiddenProcs = pendingHiddenFiltersRef.current.procs;
+      setSelectedProcs(new Set(allRaw.map(s => s.Id).filter(id => !_hiddenProcs.has(String(id)))));
 
-      // Fetch job durations in parallel (batches of 10 to avoid flooding)
+      // Step 3: enrich each schedule with job history
       const enriched = [];
       const BATCH = 10;
       const fallbackMs = defaultDurMin * 60 * 1000;
-      for (let i = 0; i < raw.length; i += BATCH) {
-        const batch = raw.slice(i, i + BATCH);
+      for (let i = 0; i < allRaw.length; i += BATCH) {
+        const batch = allRaw.slice(i, i + BATCH);
         const results = await Promise.allSettled(
           batch.map(async s => {
             let jobs = [];
-            try { jobs = await fetchJobsForSchedule(fetchCfg, s.ReleaseName || s.Name); }
+            try { jobs = await fetchJobsForSchedule({ ...fetchCfg, folder: s._folderId }, s.ReleaseName || s.Name); }
             catch (e) { console.warn('[USV] Job history unavailable for', s.ReleaseName || s.Name, '—', e.message); }
             const rawArgs = s.InputArguments || jobs[0]?.InputArguments || null;
             return {
@@ -1117,6 +1198,8 @@ function App() {
               machine:        s.MachineRobotAssignment || null,
               serviceAccount: s.ServiceAccountDisplayName || null,
               inputArgs:      parseInputArgs(rawArgs),
+              folderId:       s._folderId,
+              folderName:     s._folderName,
               medianMs:       medianDurationMs(jobs, fallbackMs),
             };
           })
@@ -1155,15 +1238,15 @@ function App() {
 
       const filtered = schedules.filter(s =>
         selectedProcs.has(s.id) &&
-        selectedMachines.has(s.machine || 'Unassigned')
+        selectedMachines.has(s.machine || 'Unassigned') &&
+        (selectedFolders.size === 0 || selectedFolders.has(s.folderId || ''))
       );
 
       filtered.forEach(s => {
         if (!s.cron) return;
         const occurrences = projectSchedule(s.cron, s.tz, projDays, s.medianMs, uiTimezone);
         occurrences.forEach(occ => {
-          const d = occ.start;
-          const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+          const key = dayKey(occ.start, uiTimezone);
           if (!byDay[key]) byDay[key] = [];
           byDay[key].push({ schedule: s, occurrence: occ });
         });
@@ -1196,11 +1279,30 @@ function App() {
     }, 20);
 
     return () => clearTimeout(tid);
-  }, [schedules, selectedProcs, selectedMachines, projDays, uiTimezone]);
+  }, [schedules, selectedProcs, selectedMachines, selectedFolders, projDays, uiTimezone]);
+
+  // ── Sync filter state to URL (enables refresh/share persistence) ─────────────
+  useEffect(() => {
+    if (!schedules.length) return;
+    const p = new URLSearchParams();
+    const hiddenProcs = schedules.map(s => String(s.id)).filter(id => !selectedProcs.has(id));
+    if (hiddenProcs.length) p.set('hp', hiddenProcs.join(','));
+    const hiddenMachines = machines.map(m => m.id).filter(id => !selectedMachines.has(id));
+    if (hiddenMachines.length) p.set('hm', hiddenMachines.join(','));
+    const hiddenFolders = folders.map(f => String(f.Id)).filter(id => !selectedFolders.has(id));
+    if (hiddenFolders.length) p.set('hf', hiddenFolders.join(','));
+    if (calView !== 'month') p.set('view', calView);
+    if (projDays !== 30) p.set('days', String(projDays));
+    const defaultTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (uiTimezone && uiTimezone !== defaultTz) p.set('tz', uiTimezone);
+    const qs = p.toString();
+    window.history.replaceState(null, '', qs ? `?${qs}` : window.location.pathname);
+  }, [schedules, selectedProcs, selectedMachines, selectedFolders, calView, projDays, uiTimezone, machines, folders]);
 
   // ── Toggle helpers ───────────────────────────────────────────────────────────
   const toggleProc    = id => setSelectedProcs(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleMachine = id => setSelectedMachines(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleFolder  = id => setSelectedFolders(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   // ── Tooltip handlers ─────────────────────────────────────────────────────────
   const handleHover  = useCallback((event, pos) => setTooltip({ event, pos }), []);
@@ -1276,17 +1378,17 @@ function App() {
   const totalEvents  = useMemo(() => Object.values(eventsByDay).reduce((s, a) => s + a.length, 0), [eventsByDay]);
   const windowEvents = useMemo(() => {
     if (calView === 'month') {
+      const k = dayKey(anchorDate, uiTimezone);
+      const prefix = k.slice(0, k.lastIndexOf('-') + 1); // "Y-M0-"
       return Object.entries(eventsByDay)
-        .filter(([k]) => k.startsWith(`${anchorDate.getFullYear()}-${anchorDate.getMonth()}-`))
+        .filter(([key]) => key.startsWith(prefix))
         .reduce((s, [, a]) => s + a.length, 0);
     }
-    return viewDays.reduce((s, d) => {
-      const k = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-      return s + (eventsByDay[k] || []).length;
-    }, 0);
-  }, [eventsByDay, calView, anchorDate, viewDays]);
+    return viewDays.reduce((s, d) => s + (eventsByDay[dayKey(d, uiTimezone)] || []).length, 0);
+  }, [eventsByDay, calView, anchorDate, viewDays, uiTimezone]);
 
   const procItems    = useMemo(() => schedules.map(s => ({ id: s.id, label: s.name })), [schedules]);
+  const folderItems  = useMemo(() => folders.map(f => ({ id: String(f.Id), label: f.DisplayName || f.FullyQualifiedName || String(f.Id) })), [folders]);
   const showSkeleton = loading || projecting;
 
   return (
@@ -1311,7 +1413,7 @@ function App() {
             </svg>
           </div>
           <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--c-text)', letterSpacing: '.02em' }}>
-            UiPath Schedule Visualizer
+            UiPath Job Schedules
           </span>
         </div>
 
@@ -1417,6 +1519,19 @@ function App() {
                         items={machines}
                         selected={selectedMachines}
                         onToggle={toggleMachine}
+                      />
+                    </CollapsibleSection>
+                  </>
+                )}
+                {folderItems.length > 1 && (
+                  <>
+                    <hr style={{ border: 'none', borderTop: '1px solid var(--c-border)', margin: '6px 0 10px' }} />
+                    <CollapsibleSection title="Folders" defaultOpen={false}>
+                      <FilterList
+                        label=""
+                        items={folderItems}
+                        selected={selectedFolders}
+                        onToggle={toggleFolder}
                       />
                     </CollapsibleSection>
                   </>
@@ -1527,6 +1642,7 @@ function App() {
               colorMap={colorMap}
               onHover={handleHover}
               onLeave={handleLeave}
+              uiTimezone={uiTimezone}
             />
           )}
           {!showSkeleton && schedules.length > 0 && calView !== 'month' && (
@@ -1537,6 +1653,7 @@ function App() {
                 colorMap={colorMap}
                 onHover={handleHover}
                 onLeave={handleLeave}
+                uiTimezone={uiTimezone}
               />
             </div>
           )}
@@ -1544,7 +1661,7 @@ function App() {
       </div>
 
       {/* Tooltip portal */}
-      <Tooltip event={tooltip.event} pos={tooltip.pos} />
+      <Tooltip event={tooltip.event} pos={tooltip.pos} uiTimezone={uiTimezone} />
 
       {/* Toast portal – fixed top-right */}
       <Toast error={error} onClose={() => setError(null)} />

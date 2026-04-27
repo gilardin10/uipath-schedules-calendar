@@ -81,17 +81,26 @@ export async function onRequestPost({ request }) {
     if (!orchestratorUrl || !clientId || !clientSecret) {
       return json({ ok: false, error: 'getToken requires orchestratorUrl, clientId, clientSecret' }, 400);
     }
+    
     let tokenUrl;
     try {
       const parsed = new URL(orchestratorUrl);
+      // Modern Automation Cloud uses the /identity_/ path
       tokenUrl = parsed.hostname.endsWith('uipath.com')
-        ? 'https://account.uipath.com/oauth/token'
+        ? 'https://cloud.uipath.com/identity_/connect/token'
         : `${parsed.origin}/identity/connect/token`;
     } catch {
       return json({ ok: false, error: 'Invalid orchestratorUrl' }, 400);
     }
-    const formBody = new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret });
-    if (orchestratorUrl.includes('uipath.com')) formBody.set('scope', 'OR.Default');
+
+    const formBody = new URLSearchParams({ 
+      grant_type: 'client_credentials', 
+      client_id: clientId, 
+      client_secret: clientSecret,
+      // Use specific scopes instead of OR.Default
+      scope: 'OR.Folders.Read OR.Execution.Read' 
+    });
+
     let tokenRes;
     try {
       tokenRes = await fetch(tokenUrl, {

@@ -71,6 +71,12 @@ export async function onRequestPost({ request }) {
       '$filter': 'Enabled eq true',
       '$top':    '500',
     };
+  } else if (action === 'folders') {
+    odataPath   = '/odata/Folders';
+    odataParams = {
+      '$select': 'Id,DisplayName,FullyQualifiedName',
+      '$top':    '200',
+    };
   } else if (action === 'jobs') {
     if (!releaseName) return json({ ok: false, error: 'releaseName required for jobs action' }, 400);
     // Escape single-quotes for OData string literals
@@ -98,7 +104,7 @@ export async function onRequestPost({ request }) {
     'Authorization': `Bearer ${pat}`,
     'Content-Type':  'application/json',
   };
-  if (folder) upstreamHeaders['X-UIPATH-OrganizationUnitId'] = String(folder);
+  if (folder && action !== 'folders') upstreamHeaders['X-UIPATH-OrganizationUnitId'] = String(folder);
 
   let upstreamRes;
   try {

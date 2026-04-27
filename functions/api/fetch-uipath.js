@@ -67,9 +67,15 @@ export async function onRequestPost({ request }) {
   if (action === 'schedules') {
     odataPath   = '/odata/ProcessSchedules';
     odataParams = {
-      '$select': 'Id,Name,StartProcessCron,TimeZoneId,Enabled,ReleaseId,ReleaseName,ServiceAccountDisplayName,InputArguments,RuntimeType',
+      '$select': 'Id,Name,StartProcessCron,TimeZoneId,Enabled,ReleaseId,ReleaseName,InputArguments',
       '$filter': 'Enabled eq true',
       '$top':    '500',
+    };
+  } else if (action === 'folders') {
+    odataPath   = '/odata/Folders';
+    odataParams = {
+      '$select': 'Id,DisplayName,FullyQualifiedName',
+      '$top':    '200',
     };
   } else if (action === 'jobs') {
     if (!releaseName) return json({ ok: false, error: 'releaseName required for jobs action' }, 400);
@@ -98,7 +104,7 @@ export async function onRequestPost({ request }) {
     'Authorization': `Bearer ${pat}`,
     'Content-Type':  'application/json',
   };
-  if (folder) upstreamHeaders['X-UIPATH-OrganizationUnitId'] = String(folder);
+  if (folder && action !== 'folders') upstreamHeaders['X-UIPATH-OrganizationUnitId'] = String(folder);
 
   let upstreamRes;
   try {
@@ -108,19 +114,23 @@ export async function onRequestPost({ request }) {
   }
 
   // ── 5. Map upstream errors ────────────────────────────────────────────────
+  // Always return HTTP 200 from our function so Cloudflare's edge never strips
+  // the response body. The real Orchestrator status is embedded in the JSON.
   if (!upstreamRes.ok) {
     const { status } = upstreamRes;
+    let detail = '';
+    try { const t = await upstreamRes.text(); detail = t ? ` — ${t.slice(0, 200)}` : ''; } catch (_) {}
     let error;
     if (status === 401) {
       error = '401: Token expired or invalid. Re-enter your Bearer Token.';
     } else if (status === 403) {
       error = '403: Forbidden — check PAT scopes (OR.Execution, OR.Monitoring, OR.Jobs) and folder access.';
     } else if (status === 400) {
-      error = '400: Bad Request — verify Orchestrator URL, tenant name, API prefix, and folder ID.';
+      error = `400: Bad Request — verify Orchestrator URL, tenant name, API prefix, and folder ID.${detail}`;
     } else {
-      error = `HTTP ${status} from Orchestrator`;
+      error = `HTTP ${status} from Orchestrator${detail}`;
     }
-    return json({ ok: false, error, status }, status);
+    return json({ ok: false, error, status });
   }
 
   // ── 6. Return data ───────────────────────────────────────────────────────

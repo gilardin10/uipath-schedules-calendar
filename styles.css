@@ -569,7 +569,7 @@ input[type=checkbox] {
   white-space: nowrap;
   line-height: 1;
 }
-.tg-col { flex: 1; position: relative; border-left: 1px solid var(--c-border); min-width: 0; }
+.tg-col { flex: 1; position: relative; border-left: 1px solid var(--c-border); min-width: 0; overflow: hidden; }
 .tg-hour-line {
   position: absolute; left: 0; right: 0;
   border-top: 1px solid var(--c-border);

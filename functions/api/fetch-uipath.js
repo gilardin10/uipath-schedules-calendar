@@ -3,21 +3,16 @@
  *
  * Route: POST /api/fetch-uipath
  *
- * The browser sends the user's PAT in the Authorization header so it
- * never travels to third-party CORS proxies.  All Orchestrator requests
- * are made here, server-side, where CORS is irrelevant.
- *
  * Request body (JSON):
- *   action          "schedules" | "jobs"
- *   orchestratorUrl Base URL, e.g. "https://cloud.uipath.com/org"
- *   tenant          Tenant name, e.g. "Default"
- *   folder          Folder / Org-Unit ID (optional)
- *   apiPrefix       "/orchestrator_" for Cloud, "" for on-prem
+ *   action          "schedules" | "jobs" | "folders" | "machines" | "releaseTags"
+ *   orchestratorUrl Full Orchestrator base URL including tenant + API prefix, e.g.
+ *                   "https://cloud.uipath.com/org/Default/orchestrator_"
+ *   folder          Folder / Org-Unit ID (optional header value)
  *   releaseName     Required only when action === "jobs"
  *
  * Response (JSON):
- *   { ok: true,  value: [...] }   — success
- *   { ok: false, error: "...", status: 4xx }  — failure
+ *   { ok: true,  value: [...] }
+ *   { ok: false, error: "...", status: 4xx }
  */
 
 const CORS = {
@@ -33,34 +28,31 @@ function json(body, status = 200) {
   });
 }
 
-// Handle CORS preflight
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: CORS });
 }
 
 export async function onRequestPost({ request }) {
-  // ── 1. Extract PAT ───────────────────────────────────────────────────────
+  // ── 1. Extract PAT ────────────────────────────────────────────────────────
   const authHeader = request.headers.get('Authorization') || '';
   const pat = authHeader.replace(/^Bearer\s+/i, '').trim();
   if (!pat) return json({ ok: false, error: 'Missing Authorization header' }, 401);
 
-  // ── 2. Parse body ────────────────────────────────────────────────────────
+  // ── 2. Parse body ─────────────────────────────────────────────────────────
   let body;
   try { body = await request.json(); }
   catch { return json({ ok: false, error: 'Request body must be valid JSON' }, 400); }
 
-  const { action, orchestratorUrl, tenant, folder, apiPrefix, releaseName } = body;
+  const { action, orchestratorUrl, folder, releaseName } = body;
 
-  if (!orchestratorUrl || !tenant || !action) {
-    return json({
-      ok: false,
-      error: 'Missing required fields: orchestratorUrl, tenant, action',
-    }, 400);
+  if (!orchestratorUrl || !action) {
+    return json({ ok: false, error: 'Missing required fields: orchestratorUrl, action' }, 400);
   }
 
-  // ── 3. Build upstream URL ────────────────────────────────────────────────
-  const base   = orchestratorUrl.replace(/\/$/, '');
-  const prefix = (apiPrefix || '').replace(/\/$/, '');
+  // ── 3. Build upstream URL ─────────────────────────────────────────────────
+  // orchestratorUrl already includes org/tenant/prefix, e.g.
+  // https://cloud.uipath.com/myorg/Default/orchestrator_
+  const base = orchestratorUrl.replace(/\/$/, '');
 
   let odataPath, odataParams;
 
@@ -79,7 +71,6 @@ export async function onRequestPost({ request }) {
     };
   } else if (action === 'jobs') {
     if (!releaseName) return json({ ok: false, error: 'releaseName required for jobs action' }, 400);
-    // Escape single-quotes for OData string literals
     const safe  = releaseName.replace(/'/g, "''");
     odataPath   = '/odata/Jobs';
     odataParams = {
@@ -87,6 +78,18 @@ export async function onRequestPost({ request }) {
       '$select':  'Id,StartTime,EndTime,State,InputArguments',
       '$orderby': 'StartTime desc',
       '$top':     '10',
+    };
+  } else if (action === 'machines') {
+    odataPath   = '/odata/Machines';
+    odataParams = {
+      '$select': 'Id,Name,Type,NonProductionSlots',
+      '$top':    '200',
+    };
+  } else if (action === 'releaseTags') {
+    odataPath   = '/odata/Releases';
+    odataParams = {
+      '$select': 'Id,Name,Tags',
+      '$top':    '500',
     };
   } else {
     return json({ ok: false, error: `Unknown action: ${action}` }, 400);
@@ -97,9 +100,9 @@ export async function onRequestPost({ request }) {
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join('&');
 
-  const upstreamUrl = `${base}/${tenant}${prefix}${odataPath}?${qs}`;
+  const upstreamUrl = `${base}${odataPath}?${qs}`;
 
-  // ── 4. Call Orchestrator ─────────────────────────────────────────────────
+  // ── 4. Call Orchestrator ──────────────────────────────────────────────────
   const upstreamHeaders = {
     'Authorization': `Bearer ${pat}`,
     'Content-Type':  'application/json',
@@ -133,7 +136,7 @@ export async function onRequestPost({ request }) {
     return json({ ok: false, error, status });
   }
 
-  // ── 6. Return data ───────────────────────────────────────────────────────
+  // ── 6. Return data ────────────────────────────────────────────────────────
   let data;
   try { data = await upstreamRes.json(); }
   catch { return json({ ok: false, error: 'Orchestrator returned a non-JSON response' }, 502); }

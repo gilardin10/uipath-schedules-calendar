@@ -219,7 +219,7 @@ export async function onRequestPost({ request }) {
     try { const t = await upstreamRes.text(); detail = t ? ` — ${t.slice(0, 200)}` : ''; } catch (_) {}
     let error;
     if (status === 401)      error = '401: Token expired or invalid. Re-authenticate.';
-    else if (status === 403) error = '403: Forbidden — check token scopes (OR.Execution, OR.Monitoring, OR.Jobs) and folder access.';
+    else if (status === 403) error = `403: Forbidden — Error: ${detail}`;
     else if (status === 400) error = `400: Bad Request — verify Orchestrator URL, tenant, and folder ID.${detail}`;
     else                     error = `HTTP ${status} from Orchestrator${detail}`;
     return json({ ok: false, error, status });

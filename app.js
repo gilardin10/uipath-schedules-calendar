@@ -1137,8 +1137,7 @@ function App() {
   }, [machines]);
 
   useEffect(() => {
-    const hidden = pendingHiddenFiltersRef.current.folders;
-    setSelectedFolders(new Set(folders.map(f => String(f.Id)).filter(id => !hidden.has(id))));
+    setSelectedFolders(new Set(folders.map(f => String(f.Id))));
   }, [folders]);
 
   useEffect(() => {
@@ -1221,8 +1220,7 @@ function App() {
       const cm = {};
       allRaw.forEach((s, i) => { cm[s.Id] = colorForIndex(i); });
       setColorMap(cm);
-      const _hiddenProcs = pendingHiddenFiltersRef.current.procs;
-      setSelectedProcs(new Set(allRaw.map(s => s.Id).filter(id => !_hiddenProcs.has(String(id)))));
+      setSelectedProcs(new Set(allRaw.map(s => s.Id)));
 
       // Step 3: enrich each schedule with job history (uses cache when fresh)
       const enriched = [];
@@ -1345,26 +1343,6 @@ function App() {
 
     return () => clearTimeout(tid);
   }, [schedules, selectedProcs, selectedMachines, selectedFolders, selectedTags, projDays, uiTimezone]);
-
-  // ── Sync filter state to URL (enables refresh/share persistence) ─────────────
-  useEffect(() => {
-    if (!schedules.length) return;
-    const p = new URLSearchParams();
-    const hiddenProcs = schedules.map(s => String(s.id)).filter(id => !selectedProcs.has(id));
-    if (hiddenProcs.length) p.set('hp', hiddenProcs.join(','));
-    const hiddenMachines = machines.map(m => m.id).filter(id => !selectedMachines.has(id));
-    if (hiddenMachines.length) p.set('hm', hiddenMachines.join(','));
-    const hiddenFolders = folders.map(f => String(f.Id)).filter(id => !selectedFolders.has(id));
-    if (hiddenFolders.length) p.set('hf', hiddenFolders.join(','));
-    const hiddenTags = allTags.filter(t => !selectedTags.has(t));
-    if (hiddenTags.length) p.set('ht', hiddenTags.join(','));
-    if (calView !== 'month') p.set('view', calView);
-    if (projDays !== 7) p.set('days', String(projDays));
-    const defaultTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (uiTimezone && uiTimezone !== defaultTz) p.set('tz', uiTimezone);
-    const qs = p.toString();
-    window.history.replaceState(null, '', qs ? `?${qs}` : window.location.pathname);
-  }, [schedules, selectedProcs, selectedMachines, selectedFolders, selectedTags, allTags, calView, projDays, uiTimezone, machines, folders]);
 
   // ── Toggle helpers ───────────────────────────────────────────────────────────
   const toggleProc    = id => setSelectedProcs(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });

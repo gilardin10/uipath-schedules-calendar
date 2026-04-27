@@ -107,9 +107,7 @@ export async function onRequestPost({ request }) {
     'Authorization': `Bearer ${pat}`,
     'Content-Type':  'application/json',
   };
-  if (folder && action !== 'folders') {
-    upstreamHeaders['X-UIPATH-OrganizationUnitId'] = String(folder);
-  }
+  if (folder && action !== 'folders') upstreamHeaders['X-UIPATH-OrganizationUnitId'] = String(folder);
 
   let upstreamRes;
   try {
@@ -119,6 +117,8 @@ export async function onRequestPost({ request }) {
   }
 
   // ── 5. Map upstream errors ────────────────────────────────────────────────
+  // Always return HTTP 200 from our function so Cloudflare's edge never strips
+  // the response body. The real Orchestrator status is embedded in the JSON.
   if (!upstreamRes.ok) {
     const { status } = upstreamRes;
     let detail = '';
@@ -129,7 +129,7 @@ export async function onRequestPost({ request }) {
     } else if (status === 403) {
       error = '403: Forbidden — check PAT scopes (OR.Execution, OR.Monitoring, OR.Jobs) and folder access.';
     } else if (status === 400) {
-      error = `400: Bad Request — verify Orchestrator URL and folder ID.${detail}`;
+      error = `400: Bad Request — verify Orchestrator URL, tenant name, API prefix, and folder ID.${detail}`;
     } else {
       error = `HTTP ${status} from Orchestrator${detail}`;
     }

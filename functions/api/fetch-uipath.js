@@ -82,16 +82,24 @@ export async function onRequestPost({ request }) {
       return json({ ok: false, error: 'getToken requires orchestratorUrl, clientId, clientSecret' }, 400);
     }
     
-    let tokenUrl;
-    try {
+  let tokenUrl;
+  try {
       const parsed = new URL(orchestratorUrl);
-      // Modern Automation Cloud uses the /identity_/ path
-      tokenUrl = parsed.hostname.endsWith('uipath.com')
-        ? 'https://cloud.uipath.com/identity_/connect/token'
-        : `${parsed.origin}/identity/connect/token`;
-    } catch {
+      if (parsed.hostname.endsWith('uipath.com')) {
+          // Extract the Org Name from: https://cloud.uipath.com/ORG_NAME/TENANT_NAME/
+          const pathParts = parsed.pathname.split('/').filter(p => p);
+          const orgName = pathParts[0]; 
+          
+          // If we found an Org Name, use the Org-specific Identity endpoint
+          tokenUrl = orgName 
+              ? `https://cloud.uipath.com/${orgName}/identity_/connect/token`
+              : 'https://cloud.uipath.com/identity_/connect/token';
+      } else {
+          tokenUrl = `${parsed.origin}/identity/connect/token`;
+      }
+  } catch {
       return json({ ok: false, error: 'Invalid orchestratorUrl' }, 400);
-    }
+  }
 
     const formBody = new URLSearchParams({ 
       grant_type: 'client_credentials', 

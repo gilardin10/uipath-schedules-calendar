@@ -6,7 +6,6 @@
  * Actions (sent in JSON body):
  *   pkceExchange  Exchange PKCE auth code for access token (no prior token needed)
  *   getToken      Exchange client_credentials for bearer token (no prior token needed)
- *   listOrgs      List UiPath Cloud organizations (needs Authorization header)
  *   schedules | jobs | folders | machines | releaseTags
  *                 Standard Orchestrator OData calls (needs Authorization header + orchestratorUrl)
  *
@@ -82,30 +81,21 @@ export async function onRequestPost({ request }) {
       return json({ ok: false, error: 'getToken requires orchestratorUrl, clientId, clientSecret' }, 400);
     }
     
-  let tokenUrl;
-  try {
+    let tokenUrl;
+    try {
       const parsed = new URL(orchestratorUrl);
-      if (parsed.hostname.endsWith('uipath.com')) {
-          // Extract the Org Name from: https://cloud.uipath.com/ORG_NAME/TENANT_NAME/
-          const pathParts = parsed.pathname.split('/').filter(p => p);
-          const orgName = pathParts[0]; 
-          
-          // If we found an Org Name, use the Org-specific Identity endpoint
-          tokenUrl = orgName 
-              ? `https://cloud.uipath.com/${orgName}/identity_/connect/token`
-              : 'https://cloud.uipath.com/identity_/connect/token';
-      } else {
-          tokenUrl = `${parsed.origin}/identity/connect/token`;
-      }
-  } catch {
+      // For Automation Cloud, ALWAYS use the global endpoint for External Apps.
+      tokenUrl = parsed.hostname.endsWith('uipath.com')
+        ? 'https://cloud.uipath.com/identity_/connect/token'
+        : `${parsed.origin}/identity/connect/token`;
+    } catch {
       return json({ ok: false, error: 'Invalid orchestratorUrl' }, 400);
-  }
+    }
 
     const formBody = new URLSearchParams({ 
       grant_type: 'client_credentials', 
       client_id: clientId, 
       client_secret: clientSecret,
-      // Use specific scopes instead of OR.Default
       scope: 'OR.Folders.Read OR.Execution.Read OR.Machines.Read OR.Users.Read OR.Queues.Read OR.Assets.Read'    
     });
 
@@ -136,28 +126,7 @@ export async function onRequestPost({ request }) {
   const pat = authHeader.replace(/^Bearer\s+/i, '').trim();
   if (!pat) return json({ ok: false, error: 'Missing Authorization header' }, 401);
 
-  // ── 5. listOrgs: UiPath Cloud account/org discovery ───────────────────────
-  if (action === 'listOrgs') {
-    let res;
-    try {
-      res = await fetch('https://cloud.uipath.com/api/account', {
-        headers: { 'Authorization': `Bearer ${pat}` },
-      });
-    } catch (err) {
-      return json({ ok: false, error: `Network error: ${err.message}` }, 502);
-    }
-    if (!res.ok) {
-      let detail = '';
-      try { const t = await res.text(); detail = t ? ` — ${t.slice(0, 200)}` : ''; } catch (_) {}
-      return json({ ok: false, error: `Accounts API returned HTTP ${res.status}${detail}` });
-    }
-    let data;
-    try { data = await res.json(); }
-    catch { return json({ ok: false, error: 'Accounts API returned a non-JSON response' }, 502); }
-    return json({ ok: true, value: data.accounts || data.value || [] });
-  }
-
-  // ── 6. OData actions require orchestratorUrl ──────────────────────────────
+  // ── 5. OData actions require orchestratorUrl ──────────────────────────────
   if (!orchestratorUrl) {
     return json({ ok: false, error: 'Missing required field: orchestratorUrl' }, 400);
   }

@@ -153,7 +153,7 @@ async function startPkceFlow(clientId) {
   const p = new URLSearchParams({
     response_type:         'code',
     client_id:             clientId,
-    scope:                 'openid OR.Default offline_access',
+    scope:                 'openid OR.Default',
     redirect_uri:          redirectUri,
     code_challenge:        challenge,
     code_challenge_method: 'S256',
@@ -1354,31 +1354,59 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
         {/* PKCE mode */}
         {isPkce && (
           <>
-            {cfg.token ? (
-              <div style={{ padding: '8px 10px', background: 'rgba(0,196,140,.08)',
+            {cfg.token && (
+              <div style={{ padding: '7px 10px', background: 'rgba(0,196,140,.08)',
                 border: '1px solid rgba(0,196,140,.25)', borderRadius: 6, fontSize: 12, color: '#00C48C' }}>
                 ✓ Authorized via UiPath OAuth
-                {cfg.pkceOrg && <span style={{ color: 'var(--c-muted)', marginLeft: 8 }}>{cfg.pkceOrg}/{cfg.pkceTenant}</span>}
-              </div>
-            ) : (
-              <div className="field-hint" style={{ color: '#FFB800' }}>
-                ⚠ Not yet authorized — enter your Client ID and click Authorize.
+                {cfg.pkceOrg && (
+                  <span style={{ color: 'var(--c-muted)', marginLeft: 8 }}>
+                    {cfg.pkceOrg}/{cfg.pkceTenant}
+                  </span>
+                )}
               </div>
             )}
+
+            {/* Setup prerequisites */}
+            <div style={{ background: 'rgba(0,174,239,.06)', border: '1px solid rgba(0,174,239,.2)',
+              borderRadius: 6, padding: '9px 11px', fontSize: 11, color: 'var(--c-text)', lineHeight: 1.65 }}>
+              <div style={{ fontWeight: 700, color: 'var(--c-blue)', marginBottom: 5 }}>
+                Setup required (one time)
+              </div>
+              <div style={{ marginBottom: 4 }}>
+                <strong>1.</strong> Go to <strong>UiPath Automation Cloud → Admin → External Applications → + Add Application</strong>
+              </div>
+              <div style={{ marginBottom: 4 }}>
+                <strong>2.</strong> Set type to <strong>Non-confidential (Public)</strong>
+              </div>
+              <div style={{ marginBottom: 4 }}>
+                <strong>3.</strong> Add Redirect URL — copy exactly:
+              </div>
+              <div style={{
+                fontFamily: 'monospace', fontSize: 10, background: 'rgba(0,0,0,.25)',
+                border: '1px solid var(--c-border)', borderRadius: 4,
+                padding: '4px 7px', color: 'var(--c-blue)',
+                wordBreak: 'break-all', marginBottom: 4, userSelect: 'all',
+              }}>
+                {`${window.location.origin}${window.location.pathname}`}
+              </div>
+              <div style={{ marginBottom: 0 }}>
+                <strong>4.</strong> Add scope: <code style={{ color: 'var(--c-blue)', fontSize: 10 }}>OR.Default</code>
+              </div>
+            </div>
+
             <div className="modal-field">
               <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
-                Client ID <HintIcon text="External Application Client ID registered at UiPath Automation Cloud (no secret needed for PKCE)." />
+                Client ID
+                <HintIcon text="Copy the Client ID shown after saving the External Application in UiPath." />
               </div>
               <input type="text" value={local.pkceClientId || ''} onChange={e => set('pkceClientId', e.target.value)}
                 placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autoComplete="off" />
             </div>
-            <div className="field-hint">
-              You will be redirected to UiPath to sign in. No secret is needed — PKCE uses only the Client ID.
-            </div>
-            <button className="btn-primary" style={{ width: '100%', justifyContent: 'center', marginTop: 4 }}
+
+            <button className="btn-primary" style={{ width: '100%', justifyContent: 'center' }}
               onClick={handlePkceConnect}
               disabled={pkceStarting || !local.pkceClientId}>
-              {pkceStarting ? 'Redirecting…' : '↗ Authorize with UiPath'}
+              {pkceStarting ? 'Redirecting…' : '↗ Sign in with UiPath'}
             </button>
           </>
         )}

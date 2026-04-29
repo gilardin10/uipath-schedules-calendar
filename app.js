@@ -1265,7 +1265,7 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
   const canSave = local.orchestratorUrl && (
     isApp  ? (local.clientId && local.clientSecret) :
     isPkce ? local.token :
-    local.token
+    local.token                                       // PAT
   );
 
   function handleSave() {
@@ -1396,6 +1396,16 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
 
             <div className="modal-field">
               <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
+                Orchestrator URL
+                <HintIcon text="Full URL to your Orchestrator tenant, e.g. https://cloud.uipath.com/org/tenant/orchestrator_ — filled automatically after sign-in, or paste manually." />
+              </div>
+              <input type="text" value={local.orchestratorUrl || ''} onChange={e => set('orchestratorUrl', e.target.value)}
+                placeholder="https://cloud.uipath.com/org/tenant/orchestrator_" />
+              <div className="field-hint">Set automatically after sign-in, or paste your Orchestrator URL here.</div>
+            </div>
+
+            <div className="modal-field">
+              <div className="field-label" style={{ display: 'flex', alignItems: 'center' }}>
                 Client ID
                 <HintIcon text="Copy the Client ID shown after saving the External Application in UiPath." />
               </div>
@@ -1422,12 +1432,13 @@ function ConnectionPopover({ cfg, onSave, loading, onClose }) {
           </button>
         </div>
       )}
-      {isPkce && cfg.token && (
+      {isPkce && local.token && (
         <div className="popover-footer">
-          <button className="btn-ghost" onClick={onClose}>Close</button>
-          <button className="btn-primary" onClick={() => { onSave(local); onClose(); }}
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={handleSave}
+            disabled={loading || !canSave}
             style={{ flex: 1, justifyContent: 'center' }}>
-            Reload Schedules
+            {loading ? 'Loading…' : 'Save & Fetch'}
           </button>
         </div>
       )}
@@ -1632,11 +1643,14 @@ function App() {
       .then(token => {
         sessionStorage.setItem(SS_KEY, token);
         setCfg(c => ({ ...c, token, authMode: 'pkce', pkceClientId: cid }));
-        return listOrgsFromToken(token).then(orgs => {
-          setPkceOrgs(orgs);
-          if (orgs.length === 1) setPkceSelOrg(orgs[0].accountName || '');
-          setPkceStatus('select-org');
-        });
+        // Org discovery is best-effort — always proceed to select-org overlay
+        return listOrgsFromToken(token)
+          .then(orgs => {
+            setPkceOrgs(orgs);
+            if (orgs.length === 1) setPkceSelOrg(orgs[0].accountName || '');
+          })
+          .catch(() => {}) // silently ignore — overlay shows manual inputs
+          .then(() => setPkceStatus('select-org'));
       })
       .catch(err => {
         setPkceError(err.message || String(err));
